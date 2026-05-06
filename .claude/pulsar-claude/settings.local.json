@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(mv /workspaces/pulsar/README.md /tmp/pulsar-README.md)",
+      "Bash(mv /workspaces/pulsar/.gitignore /tmp/pulsar-gitignore)",
+      "Bash(npx --yes create-next-app@latest . --ts --tailwind --app --eslint --import-alias \"@/*\" --use-npm --yes --skip-install)",
+      "Bash(mv /workspaces/pulsar/.env.local /tmp/pulsar-env.local)",
+      "Bash(mv /workspaces/pulsar/PROJECT.md /tmp/pulsar-PROJECT.md)",
+      "Bash(mv /workspaces/pulsar/prototype /tmp/pulsar-prototype)",
+      "Bash(mv /tmp/pulsar-env.local /workspaces/pulsar/.env.local)",
+      "Bash(mv /tmp/pulsar-PROJECT.md /workspaces/pulsar/PROJECT.md)",
+      "Bash(mv /tmp/pulsar-prototype /workspaces/pulsar/prototype)",
+      "Bash(rm -rf app public AGENTS.md CLAUDE.md README.md .gitignore eslint.config.mjs next-env.d.ts next.config.ts package.json postcss.config.mjs tsconfig.json)",
+      "Bash(mv .env.local /tmp/pulsar-env.local)",
+      "Bash(mv PROJECT.md /tmp/pulsar-PROJECT.md)",
+      "Bash(mv prototype *)",
+      "Bash(npx --yes create-next-app@15 . --ts --tailwind --app --eslint --import-alias \"@/*\" --use-npm --yes --skip-install)"
+    ]
+  }
+}
