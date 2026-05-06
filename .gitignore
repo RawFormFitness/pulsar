@@ -43,3 +43,6 @@ next-env.d.ts
 # csv data (sample exports, never commit real customer data)
 *.csv
 prototype/sample_data/*.csv
+
+# claude code per-developer settings
+.claude/settings.local.json
