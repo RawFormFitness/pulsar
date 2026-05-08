@@ -6,16 +6,21 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:parsers": "node --test --import tsx lib/parsers/__tests__/leads.test.ts lib/parsers/__tests__/abc_sales.test.ts lib/parsers/__tests__/abc_members.test.ts lib/parsers/__tests__/abc_rfc.test.ts lib/parsers/__tests__/abc_cancel.test.ts lib/parsers/__tests__/detect.test.ts",
+    "test:orchestrator": "node --test --import tsx lib/parsers/__tests__/orchestrator.test.ts",
+    "test": "npm run test:parsers && npm run test:orchestrator"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.105.3",
+    "@types/papaparse": "^5.5.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.14.0",
     "next": "15.5.15",
+    "papaparse": "^5.5.3",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "server-only": "^0.0.1",
@@ -33,6 +38,7 @@
     "eslint-config-next": "15.5.15",
     "supabase": "^2.98.2",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5"
   }
 }

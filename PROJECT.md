@@ -35,7 +35,7 @@ Five source inputs per gym per import:
 1. **Leads** (Gym Sales export) — flat snake_case CSV, all leads ever, includes `status`, `source`, `tags`, timestamps, `salesperson`, `waiver_signed_date`
 2. **Sales** (ABC Ignite "Membership Sales by Sign Date") — grouped report, 2 header lines to skip, agreements grouped by club → salesperson
 3. **Member Snapshot** (ABC Ignite "Active Members") — grouped report, 2 header lines to skip, current active members with MRR data, last visit, check-in count
-4. **RFC** (ABC Ignite — members removed for collections) — grouped report, slightly different layout (single header at row 1, real headers at row 2, data starts row 7)
+4. **RFC** (ABC Ignite — members removed for collections) — grouped report; title row, club-number sub-header, real headers, then group-divider rows separating the data block. Parser uses the standard grouped-report engine to locate headers and skip group rows.
 5. **Cancel Report** (ABC Ignite — cancelled members) — grouped report, simple format, 4 columns: Agreement #, Member Name, Primary Member, Member Status
 
 Working parsers for the three core CSVs are in `prototype/parsers.py`. They handle the grouped-report format (title rows, sub-headers attached as group context, footer totals dropped). RFC and Cancel parsers will be added.
