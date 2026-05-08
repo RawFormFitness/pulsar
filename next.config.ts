@@ -7,6 +7,7 @@ const nextConfig: NextConfig = {
         "ubiquitous-journey-r4j7475vjv7w35wr6-3000.app.github.dev",
         "localhost:3000",
       ],
+      bodySizeLimit: "20mb",
     },
   },
 };

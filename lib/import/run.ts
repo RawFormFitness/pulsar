@@ -16,6 +16,11 @@
 //
 // Cross-table reconciliation (sales = web + walk-in, member math, etc.) is
 // the analytics engine's job, not ours.
+//
+// Dry-run mode: when args.dryRun === true, we parse, compute the upsert
+// diff (how many rows are net-new vs. would-update), but do NOT write
+// anything. Returns RunImportDryRunResult instead. No import_history,
+// no validation_runs, no upsert. See runImport for details.
 
 import type { DbClient } from "@/lib/db";
 import * as importHistoryDb from "@/lib/db/import_history";
@@ -54,6 +59,12 @@ export type RunImportArgs = {
   format?: DetectedFormat;
   /** Optional snapshot timestamp for member imports. Defaults to now(). */
   asOf?: Date;
+  /**
+   * If true, parse + compute the would-add / would-update diff but do NOT
+   * write anything. No import_history row, no validation_runs, no upsert.
+   * Returns RunImportDryRunResult instead of RunImportResult.
+   */
+  dryRun?: boolean;
 };
 
 export type RunImportResult = {
@@ -63,6 +74,27 @@ export type RunImportResult = {
   /** True when this was a no-op due to a matching prior source_hash. */
   duplicate: boolean;
   format: DetectedFormat;
+};
+
+/**
+ * Result of a dry run: same shape as a real import in spirit, but reports
+ * the upsert diff instead of actually writing rows.
+ *
+ * `wouldNoop` is intentionally always 0 in v1 — computing it would require a
+ * deep equality check on every row's payload against the existing DB row,
+ * which is more expensive than the preview can justify. UI should treat
+ * `wouldNoop` as "we're not measuring this" and show only would-add /
+ * would-update.
+ */
+export type RunImportDryRunResult = {
+  format: DetectedFormat;
+  rowCount: number;
+  warnings: ParseWarning[];
+  wouldAdd: number;
+  wouldUpdate: number;
+  wouldNoop: number;
+  /** True if a prior import_history row matches this source_hash. */
+  duplicate: boolean;
 };
 
 // -----------------------------------------------------------------------------
@@ -126,6 +158,135 @@ async function upsertParsed(
 }
 
 /**
+ * Chunk a list into pages of size N — Supabase REST clamps URLs at ~8KB,
+ * which limits how many ids we can stuff into a `.in()` filter. 500 keeps
+ * us comfortably under the limit even for long string ids.
+ */
+function chunk<T>(xs: T[], n: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n));
+  return out;
+}
+
+const DIFF_CHUNK = 500;
+
+/**
+ * For a parse result, look up which of its natural keys already exist in
+ * the DB for this gym. Returns { wouldAdd, wouldUpdate }.
+ *
+ * Members snapshots: every row is considered would-add. The natural key
+ * (agreement_number, as_of) includes the snapshot timestamp, which the
+ * orchestrator stamps to "now" by default for each run, so a fresh dry-run
+ * never collides with a prior snapshot.
+ *
+ * Cancellations: keyed on agreement_number alone — the v1 deviation lumps
+ * all cancellations into one stream so we don't track date or reason.
+ *
+ * Performance: the lookup is paged in DIFF_CHUNK-sized batches via .in().
+ * For an 8k-row leads file that's ~17 round-trips; acceptable for a
+ * preview interaction. A future optimization could push this to a stored
+ * proc that takes the keys as one POST body.
+ */
+async function computeDiff(
+  client: DbClient,
+  gymId: string,
+  parsed: AnyParseResult,
+): Promise<{ wouldAdd: number; wouldUpdate: number }> {
+  switch (parsed.format) {
+    case "leads": {
+      const ids = parsed.rows
+        .map((r) => r.source_id)
+        .filter((v): v is string => typeof v === "string" && v.length > 0);
+      if (ids.length === 0) return { wouldAdd: 0, wouldUpdate: 0 };
+      const existing = new Set<string>();
+      for (const batch of chunk(ids, DIFF_CHUNK)) {
+        const { data, error } = await client
+          .from("leads")
+          .select("source_id")
+          .eq("gym_id", gymId)
+          .in("source_id", batch);
+        if (error) throw error;
+        for (const r of data ?? []) existing.add(r.source_id);
+      }
+      const update = ids.filter((id) => existing.has(id)).length;
+      return { wouldAdd: parsed.rows.length - update, wouldUpdate: update };
+    }
+    case "abc_sales": {
+      const nums = parsed.rows
+        .map((r) => r.agreement_number)
+        .filter((v): v is number => typeof v === "number");
+      if (nums.length === 0) return { wouldAdd: 0, wouldUpdate: 0 };
+      const existing = new Set<number>();
+      for (const batch of chunk(nums, DIFF_CHUNK)) {
+        const { data, error } = await client
+          .from("sales")
+          .select("agreement_number")
+          .eq("gym_id", gymId)
+          .in("agreement_number", batch);
+        if (error) throw error;
+        for (const r of data ?? []) existing.add(r.agreement_number);
+      }
+      const update = nums.filter((n) => existing.has(n)).length;
+      return { wouldAdd: parsed.rows.length - update, wouldUpdate: update };
+    }
+    case "abc_cancel": {
+      const nums = parsed.rows
+        .map((r) => r.agreement_number)
+        .filter((v): v is number => typeof v === "number");
+      if (nums.length === 0) return { wouldAdd: 0, wouldUpdate: 0 };
+      const existing = new Set<number>();
+      for (const batch of chunk(nums, DIFF_CHUNK)) {
+        const { data, error } = await client
+          .from("cancellations")
+          .select("agreement_number")
+          .eq("gym_id", gymId)
+          .in("agreement_number", batch);
+        if (error) throw error;
+        for (const r of data ?? []) existing.add(r.agreement_number);
+      }
+      const update = nums.filter((n) => existing.has(n)).length;
+      return { wouldAdd: parsed.rows.length - update, wouldUpdate: update };
+    }
+    case "abc_rfc": {
+      // Composite key: (agreement_number, status_date). We pull the candidate
+      // agreement_numbers, then locally intersect on (number, date) pairs.
+      const pairs = parsed.rows
+        .map((r) => ({
+          agreement_number: r.agreement_number,
+          status_date: r.status_date,
+        }))
+        .filter(
+          (p): p is { agreement_number: number; status_date: string } =>
+            typeof p.agreement_number === "number" &&
+            typeof p.status_date === "string",
+        );
+      if (pairs.length === 0) return { wouldAdd: 0, wouldUpdate: 0 };
+      const nums = Array.from(new Set(pairs.map((p) => p.agreement_number)));
+      const existing = new Set<string>();
+      for (const batch of chunk(nums, DIFF_CHUNK)) {
+        const { data, error } = await client
+          .from("rfc_entries")
+          .select("agreement_number,status_date")
+          .eq("gym_id", gymId)
+          .in("agreement_number", batch);
+        if (error) throw error;
+        for (const r of data ?? [])
+          existing.add(`${r.agreement_number}|${r.status_date}`);
+      }
+      const update = pairs.filter((p) =>
+        existing.has(`${p.agreement_number}|${p.status_date}`),
+      ).length;
+      return { wouldAdd: parsed.rows.length - update, wouldUpdate: update };
+    }
+    case "abc_members": {
+      // Snapshot table — natural key includes as_of, which is "now" for this
+      // run. Every parsed row is would-add by construction.
+      return { wouldAdd: parsed.rows.length, wouldUpdate: 0 };
+    }
+  }
+}
+
+/**
  * Run shape-only validation checks against a parse result and persist them
  * as `validation_runs` rows. These are intentionally cheap and local to
  * the import — cross-table reconciliation is the analytics engine's job.
@@ -179,9 +340,25 @@ async function recordShapeValidations(
  * matching source_hash and re-upsert idempotently. This is documented as a
  * known gap; the schema agent can address it later by adding a stored
  * procedure that does both inside a transaction.
+ *
+ * Dry-run path: if args.dryRun === true, returns a RunImportDryRunResult
+ * with the upsert diff and skips ALL writes (no import_history,
+ * no validation_runs, no upsert). The duplicate flag still reflects whether
+ * the source_hash matches a prior import.
  */
-export async function runImport(args: RunImportArgs): Promise<RunImportResult> {
-  const { client, gymId, file, filename, importedBy } = args;
+export async function runImport(
+  args: RunImportArgs & { dryRun: true },
+): Promise<RunImportDryRunResult>;
+export async function runImport(
+  args: RunImportArgs & { dryRun?: false },
+): Promise<RunImportResult>;
+export async function runImport(
+  args: RunImportArgs,
+): Promise<RunImportResult | RunImportDryRunResult>;
+export async function runImport(
+  args: RunImportArgs,
+): Promise<RunImportResult | RunImportDryRunResult> {
+  const { client, gymId, file, filename, importedBy, dryRun } = args;
   const asOf = args.asOf ?? new Date();
 
   // --- 1. Detect (or honor override). ---------------------------------------
@@ -194,6 +371,11 @@ export async function runImport(args: RunImportArgs): Promise<RunImportResult> {
   }
 
   if (format === "unknown") {
+    if (dryRun) {
+      // Dry-run never writes — surface the failure as an exception so the
+      // server action can show it without leaving a partial paper trail.
+      throw new Error(`Could not detect format of "${filename}".`);
+    }
     // Record the failed attempt so the operator has a paper trail. We
     // attempt to compute a source_hash from the input first so the failed
     // import row carries a hash for diagnostics — falls back to null if
@@ -224,6 +406,23 @@ export async function runImport(args: RunImportArgs): Promise<RunImportResult> {
     gymId,
     parsed.sourceHash,
   );
+
+  // --- DRY-RUN BRANCH -------------------------------------------------------
+  // No writes to import_history, no upsert, no validation_runs. We still
+  // compute the diff so the UI can preview impact accurately.
+  if (dryRun) {
+    const diff = await computeDiff(client, gymId, parsed);
+    return {
+      format,
+      rowCount: parsed.rowCount,
+      warnings: parsed.warnings,
+      wouldAdd: diff.wouldAdd,
+      wouldUpdate: diff.wouldUpdate,
+      wouldNoop: 0, // deliberate v1 simplification — see RunImportDryRunResult
+      duplicate: !!prior,
+    };
+  }
+
   if (prior) {
     return {
       importId: prior.id,
