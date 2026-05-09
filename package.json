@@ -10,7 +10,9 @@
     "test:parsers": "node --test --import tsx lib/parsers/__tests__/leads.test.ts lib/parsers/__tests__/abc_sales.test.ts lib/parsers/__tests__/abc_members.test.ts lib/parsers/__tests__/abc_rfc.test.ts lib/parsers/__tests__/cancel_ledger.test.ts lib/parsers/__tests__/detect.test.ts",
     "test:orchestrator": "node --test --import tsx lib/parsers/__tests__/orchestrator.test.ts",
     "test:analytics": "node --test --import tsx lib/analytics/__tests__/april_2026.test.ts lib/analytics/__tests__/test_gym_b.test.ts lib/analytics/__tests__/non_preferred_channels.test.ts",
-    "test": "npm run test:parsers && npm run test:analytics && npm run test:orchestrator"
+    "test:db": "node --test --import tsx lib/db/__tests__/_pagination.test.ts",
+    "test:db:integration": "node --test --import tsx lib/db/__tests__/helpers.integration.test.ts",
+    "test": "npm run test:parsers && npm run test:analytics && npm run test:orchestrator && npm run test:db"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",

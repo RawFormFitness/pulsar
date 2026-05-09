@@ -14,6 +14,10 @@ export type ImportHistoryInsert =
 
 /**
  * Recent imports for a gym, newest first. `limit` is capped at 200.
+ *
+ * Not routed through `paginate()` because the explicit `.limit()` already
+ * defends against the PostgREST 1,000-row cap — the helper's contract is
+ * "give me up to N", not "give me everything".
  */
 export async function listRecentImports(
   client: DbClient,

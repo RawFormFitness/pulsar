@@ -7,6 +7,7 @@
 
 import type { DbClient } from "./client";
 import type { Database } from "./types";
+import { paginate } from "./_pagination";
 
 export type Member = Database["public"]["Tables"]["members"]["Row"];
 export type MemberInsert = Database["public"]["Tables"]["members"]["Insert"];
@@ -14,21 +15,24 @@ export type MemberInsert = Database["public"]["Tables"]["members"]["Insert"];
 /**
  * All snapshot rows imported with a specific as_of timestamp. Useful for
  * "show me the snapshot the importer just produced" flows.
+ *
+ * Paginated. Powerhouse NYC's snapshot is ~1,370 rows; without paging the
+ * default PostgREST cap of 1,000 silently dropped 370 rows including most
+ * of the Pending Cancel population.
  */
 export async function getMembersAsOf(
   client: DbClient,
   gymId: string,
   asOf: Date,
 ): Promise<Member[]> {
-  const { data, error } = await client
-    .from("members")
-    .select("*")
-    .eq("gym_id", gymId)
-    .eq("as_of", asOf.toISOString())
-    .order("agreement_number", { ascending: true });
-
-  if (error) throw error;
-  return data ?? [];
+  return paginate<Member>(() =>
+    client
+      .from("members")
+      .select("*")
+      .eq("gym_id", gymId)
+      .eq("as_of", asOf.toISOString())
+      .order("agreement_number", { ascending: true }),
+  );
 }
 
 /**
@@ -66,16 +70,15 @@ export async function getChurnRiskMembers(
   const latest = await getLatestSnapshotAsOf(client, gymId);
   if (!latest) return [];
 
-  const { data, error } = await client
-    .from("members")
-    .select("*")
-    .eq("gym_id", gymId)
-    .eq("as_of", latest.toISOString())
-    .lt("last_visit_date", cutoff.toISOString().slice(0, 10)) // date column
-    .order("last_visit_date", { ascending: true });
-
-  if (error) throw error;
-  return data ?? [];
+  return paginate<Member>(() =>
+    client
+      .from("members")
+      .select("*")
+      .eq("gym_id", gymId)
+      .eq("as_of", latest.toISOString())
+      .lt("last_visit_date", cutoff.toISOString().slice(0, 10)) // date column
+      .order("last_visit_date", { ascending: true }),
+  );
 }
 
 /**

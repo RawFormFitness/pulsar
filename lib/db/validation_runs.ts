@@ -6,6 +6,7 @@
 
 import type { DbClient } from "./client";
 import type { Database, Json } from "./types";
+import { paginate } from "./_pagination";
 
 export type ValidationRun =
   Database["public"]["Tables"]["validation_runs"]["Row"];
@@ -14,21 +15,25 @@ export type ValidationRunInsert =
 
 /**
  * All validation runs attached to an import, newest first.
+ *
+ * Paginated. A single import has only a handful of runs, but this helper is
+ * also used for "all checks across all imports" reads via import_id loops,
+ * which can multiply into thousands of rows over a gym's lifetime.
  */
 export async function getValidationRunsForImport(
   client: DbClient,
   gymId: string,
   importId: string,
 ): Promise<ValidationRun[]> {
-  const { data, error } = await client
-    .from("validation_runs")
-    .select("*")
-    .eq("gym_id", gymId)
-    .eq("import_id", importId)
-    .order("ran_at", { ascending: false });
-
-  if (error) throw error;
-  return data ?? [];
+  return paginate<ValidationRun>(() =>
+    client
+      .from("validation_runs")
+      .select("*")
+      .eq("gym_id", gymId)
+      .eq("import_id", importId)
+      .order("ran_at", { ascending: false })
+      .order("id", { ascending: true }),
+  );
 }
 
 /**

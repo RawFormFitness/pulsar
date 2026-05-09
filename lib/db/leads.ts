@@ -8,6 +8,7 @@
 
 import type { DbClient } from "./client";
 import type { Database } from "./types";
+import { paginate } from "./_pagination";
 
 export type Lead = Database["public"]["Tables"]["leads"]["Row"];
 export type LeadInsert = Database["public"]["Tables"]["leads"]["Insert"];
@@ -16,6 +17,9 @@ export type LeadInsert = Database["public"]["Tables"]["leads"]["Insert"];
  * Leads created within [monthStart, monthEnd). Use for monthly cohort
  * computation in the analytics engine. Bounds are exclusive at the upper
  * end so adjacent months don't double-count.
+ *
+ * Paginated — the lead pool grows over a gym's lifetime and quickly
+ * exceeds the PostgREST 1,000-row default cap.
  */
 export async function getLeadsForMonth(
   client: DbClient,
@@ -23,16 +27,43 @@ export async function getLeadsForMonth(
   monthStart: Date,
   monthEnd: Date,
 ): Promise<Lead[]> {
-  const { data, error } = await client
-    .from("leads")
-    .select("*")
-    .eq("gym_id", gymId)
-    .gte("created_at", monthStart.toISOString())
-    .lt("created_at", monthEnd.toISOString())
-    .order("created_at", { ascending: true });
+  return paginate<Lead>(() =>
+    client
+      .from("leads")
+      .select("*")
+      .eq("gym_id", gymId)
+      .gte("created_at", monthStart.toISOString())
+      .lt("created_at", monthEnd.toISOString())
+      .order("created_at", { ascending: true }),
+  );
+}
 
-  if (error) throw error;
-  return data ?? [];
+/**
+ * Every lead row stored for a gym, ordered by created_at ascending.
+ *
+ * The analytics engine consumes the full lead pool (not just rows in the
+ * report period) because lead-to-sale matching looks back across earlier
+ * months — a sale in April can match against a lead created in March, and
+ * the channel-attribution path needs prior leads to disambiguate. Period
+ * filtering is the engine's job, not this helper's; do NOT add
+ * date-narrowing arguments here. If you need a periodized read, use
+ * `getLeadsForMonth`.
+ *
+ * Paginated. For Powerhouse NYC's hosted data this is a few thousand rows;
+ * if a future gym pushes this past tens of thousands we'll add a
+ * server-side prefilter or stream the rows.
+ */
+export async function getAllLeadsForGym(
+  client: DbClient,
+  gymId: string,
+): Promise<Lead[]> {
+  return paginate<Lead>(() =>
+    client
+      .from("leads")
+      .select("*")
+      .eq("gym_id", gymId)
+      .order("created_at", { ascending: true }),
+  );
 }
 
 /**

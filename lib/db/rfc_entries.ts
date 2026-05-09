@@ -5,6 +5,7 @@
 
 import type { DbClient } from "./client";
 import type { Database } from "./types";
+import { paginate } from "./_pagination";
 
 export type RfcEntry = Database["public"]["Tables"]["rfc_entries"]["Row"];
 export type RfcEntryInsert =
@@ -13,6 +14,12 @@ export type RfcEntryInsert =
 /**
  * RFC entries whose status_date falls in [monthStart, monthEnd). Used for
  * the monthly RFC count in the losses block.
+ *
+ * `status_date` is a `date` column (no time-of-day) so we compare with
+ * YYYY-MM-DD strings. The same gym-timezone caveat noted in
+ * `lib/db/sales.ts.getSalesForMonth` applies — see that helper's comment.
+ *
+ * Paginated to defend against the PostgREST 1,000-row cap.
  */
 export async function getRfcEntriesForMonth(
   client: DbClient,
@@ -20,37 +27,41 @@ export async function getRfcEntriesForMonth(
   monthStart: Date,
   monthEnd: Date,
 ): Promise<RfcEntry[]> {
-  const { data, error } = await client
-    .from("rfc_entries")
-    .select("*")
-    .eq("gym_id", gymId)
-    .gte("status_date", monthStart.toISOString().slice(0, 10))
-    .lt("status_date", monthEnd.toISOString().slice(0, 10))
-    .order("status_date", { ascending: true });
-
-  if (error) throw error;
-  return data ?? [];
+  const fromYmd = monthStart.toISOString().slice(0, 10);
+  const toYmd = monthEnd.toISOString().slice(0, 10);
+  return paginate<RfcEntry>(() =>
+    client
+      .from("rfc_entries")
+      .select("*")
+      .eq("gym_id", gymId)
+      .gte("status_date", fromYmd)
+      .lt("status_date", toYmd)
+      .order("status_date", { ascending: true })
+      .order("id", { ascending: true }),
+  );
 }
 
 /**
  * RFC entries with `days_past_due >= minDaysPastDue`. Used for the past-due
  * forecast workflow; the urgency-tier boundaries themselves are configured
  * in gym_configs.config (Level 2), so this helper just filters on a number.
+ *
+ * Paginated.
  */
 export async function getRfcEntriesByMinDaysPastDue(
   client: DbClient,
   gymId: string,
   minDaysPastDue: number,
 ): Promise<RfcEntry[]> {
-  const { data, error } = await client
-    .from("rfc_entries")
-    .select("*")
-    .eq("gym_id", gymId)
-    .gte("days_past_due", minDaysPastDue)
-    .order("days_past_due", { ascending: false });
-
-  if (error) throw error;
-  return data ?? [];
+  return paginate<RfcEntry>(() =>
+    client
+      .from("rfc_entries")
+      .select("*")
+      .eq("gym_id", gymId)
+      .gte("days_past_due", minDaysPastDue)
+      .order("days_past_due", { ascending: false })
+      .order("id", { ascending: true }),
+  );
 }
 
 /**

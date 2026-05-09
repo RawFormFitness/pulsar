@@ -13,6 +13,7 @@
 
 import type { DbClient } from "./client";
 import type { Database } from "./types";
+import { paginate } from "./_pagination";
 
 export type Cancellation = Database["public"]["Tables"]["cancellations"]["Row"];
 export type CancellationInsert =
@@ -25,6 +26,8 @@ export type CancellationInsert =
  * Inputs are date-only (YYYY-MM-DD) — the column itself is `date`, not
  * `timestamptz`, so callers should pass calendar dates in the gym's
  * timezone.
+ *
+ * Paginated to defend against the PostgREST 1,000-row cap.
  */
 export async function getCancellationsInPeriod(
   client: DbClient,
@@ -32,16 +35,16 @@ export async function getCancellationsInPeriod(
   from: string,
   to: string,
 ): Promise<Cancellation[]> {
-  const { data, error } = await client
-    .from("cancellations")
-    .select("*")
-    .eq("gym_id", gymId)
-    .gte("cancel_date", from)
-    .lt("cancel_date", to)
-    .order("cancel_date", { ascending: true });
-
-  if (error) throw error;
-  return data ?? [];
+  return paginate<Cancellation>(() =>
+    client
+      .from("cancellations")
+      .select("*")
+      .eq("gym_id", gymId)
+      .gte("cancel_date", from)
+      .lt("cancel_date", to)
+      .order("cancel_date", { ascending: true })
+      .order("id", { ascending: true }),
+  );
 }
 
 /**

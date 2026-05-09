@@ -39,6 +39,10 @@ export async function getGymMembership(
  * This is the auth bootstrap path: a user has to discover which gyms they
  * belong to before any gymId-scoped query can run. Most code paths already
  * know their gym and should use the (client, gymId, ...) helpers instead.
+ *
+ * Not paginated: a single user belongs to a small number of gyms (one in
+ * v1 per the "no multi-user roles" out-of-scope item). The PostgREST
+ * 1,000-row cap is not in play here.
  */
 export async function listMembershipsForCurrentUser(
   client: DbClient,

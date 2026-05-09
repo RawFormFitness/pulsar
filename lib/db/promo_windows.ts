@@ -13,6 +13,11 @@ export type PromoWindowInsert =
 
 /**
  * All promo windows defined for a gym, ordered by start_date.
+ *
+ * Not paginated: a gym defines a handful (Powerhouse NYC has ~5 in v1).
+ * Even at 100 promos this fits easily under the PostgREST 1,000-row cap.
+ * If a gym ever crosses that, switch this to use `paginate()` from
+ * `lib/db/_pagination.ts`.
  */
 export async function listPromoWindows(
   client: DbClient,
@@ -32,6 +37,9 @@ export async function listPromoWindows(
  * Promo windows that overlap the date range [from, to]. Used by the
  * validation engine ("untagged sales in known promo dates") and by the
  * forecast tier sort.
+ *
+ * Not paginated for the same reason as `listPromoWindows` — promo-window
+ * counts are small per gym.
  */
 export async function getPromoWindowsOverlapping(
   client: DbClient,
