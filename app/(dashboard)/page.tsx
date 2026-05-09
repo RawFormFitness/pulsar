@@ -1,254 +1,161 @@
 // app/(dashboard)/page.tsx
 //
-// "Your Data" home view. Server component.
+// Phase 3A — STATIC April 2026 monthly report for Powerhouse NYC.
 //
-// Scope: Task 1 only renders facts about what's been imported (last import
-// date, per-source row counts, empty state). No analytics, no charts,
-// no MetricsPack — those land in Task 3.
+// What this page is, intentionally:
+//   * Server component. Fetches MetricsPack from the analytics-engine and
+//     hands it to <DashboardView />, which renders.
+//   * Hardcoded to April 2026 + Powerhouse NYC. No period or gym selector.
+//     v1's only customer is Powerhouse, and the engine output for Apr 2026
+//     is the v1 acceptance test target.
+//   * Reads the gym config from `config/gyms/powerhouse_nyc.json` via
+//     `fs.readFile`. PROJECT.md's "Open architectural questions" section
+//     declares JSON files the canonical source of config in v1; the
+//     `gym_configs` table is reserved for v2. We do NOT mix sources.
 //
-// Boundary: this server component talks to lib/db/ for raw counts (which
-// are facts, not derived metrics). Anything computed (conversion, MRR,
-// attrition) must come from the analytics-engine, never from here.
+// Boundary discipline:
+//   * This page is the report's seam where db helpers + analytics-engine
+//     are called. (The /import page is its own seam for fact reads —
+//     row counts, last-import metadata — that don't go through the
+//     analytics engine.) Components below this page receive props and
+//     render; they don't reach back to lib/db or lib/analytics.
+//   * Multi-tenancy: gymId is resolved from session via requireSessionGym().
+//     The page filters everything to that gym. We do NOT trust a slug
+//     from the URL or body.
+//   * Members snapshot filtering happens HERE: the page calls
+//     getLatestSnapshotAsOf + getMembersAsOf, then passes the snapshot
+//     rows to the engine. The engine assumes a pre-filtered snapshot.
 
-import { CheckCircle2Icon, FileWarningIcon } from "lucide-react";
+import "server-only";
+
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
-import { ImportDialog } from "@/components/import-dialog";
-import { Button } from "@/components/ui/button";
-import {
-  importHistory as importHistoryDb,
+  cancellations as cancellationsDb,
   leads as leadsDb,
-  sales as salesDb,
   members as membersDb,
   rfcEntries as rfcEntriesDb,
-  cancellations as cancellationsDb,
-  gymConfigs as gymConfigsDb,
+  sales as salesDb,
 } from "@/lib/db";
+import {
+  calendarMonthPeriod,
+  localDateString,
+  runAnalytics,
+  type EngineInput,
+  type GymConfig,
+} from "@/lib/analytics";
+import type {
+  CancellationRow,
+  LeadRow,
+  MemberRow,
+  RfcRow,
+  SaleRow,
+} from "@/lib/parsers/types";
+import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { requireSessionGym } from "./_lib/session";
-import { PeriodSelectorClient } from "./_components/period-selector-client";
 
-// Level 1 universal source list — every gym ingests these five formats.
-// Per-gym customization lives in gym_configs (e.g., a gym without RFC
-// might hide that row), not in branching here.
-const SOURCES: { format: string; label: string }[] = [
-  { format: "leads", label: "Leads" },
-  { format: "abc_sales", label: "Sales" },
-  { format: "abc_members", label: "Members" },
-  { format: "abc_rfc", label: "RFC" },
-  { format: "cancel_ledger", label: "Cancellations" },
-];
+// Phase 3A: hardcoded to April 2026 for the static acceptance render.
+// When period selection re-lands the value comes from the URL/state.
+const PERIOD_KEY = "2026-04";
 
-type Locale = { code: string; timeZone: string };
+// Hardcoded gym slug. Multi-gym support in v1 still routes through one
+// gym at a time per session; this page assumes the session resolves to
+// the Powerhouse gym for now. If a future test gym is wired in, the
+// slug comes from gym_meta lookup keyed off session.gymId, not from a
+// URL param.
+const POWERHOUSE_SLUG = "powerhouse_nyc";
 
-function readLocaleFromConfig(config: unknown): Locale {
-  // Level 2: locale + tz come from config; we fall back to the gym's tz
-  // already on the gyms row, but the gyms row isn't passed here so we use
-  // sane defaults if nothing's set. The locale fallback intentionally
-  // doesn't hardcode "en-US" beyond this last-resort default — every
-  // formatter call below threads through `locale.code`.
-  if (config && typeof config === "object" && !Array.isArray(config)) {
-    const c = config as Record<string, unknown>;
-    const code = typeof c.locale === "string" ? c.locale : undefined;
-    const tz = typeof c.timezone === "string" ? c.timezone : undefined;
-    if (code || tz) {
-      return {
-        code: code ?? "en-US",
-        timeZone: tz ?? "UTC",
-      };
-    }
-  }
-  return { code: "en-US", timeZone: "UTC" };
+const CONFIG_DIR = resolve(process.cwd(), "config", "gyms");
+
+async function loadGymConfig(slug: string): Promise<GymConfig> {
+  // PROJECT.md: in v1 the engine reads gym config from JSON files at
+  // config/gyms/<slug>.json. The gym_configs table is reserved for v2.
+  // Do NOT scatter config reads across sources.
+  const text = await readFile(resolve(CONFIG_DIR, `${slug}.json`), "utf8");
+  return JSON.parse(text) as GymConfig;
 }
 
-export default async function DashboardHome() {
+function periodLabelFor(periodKey: string, locale: string): string {
+  // "2026-04" -> "April 2026 Monthly Report" (per the user spec).
+  const [yearStr, monthStr] = periodKey.split("-");
+  const date = new Date(Date.UTC(Number(yearStr), Number(monthStr) - 1, 1));
+  const month = new Intl.DateTimeFormat(locale, {
+    month: "long",
+    timeZone: "UTC",
+  }).format(date);
+  return `${month} ${yearStr} Monthly Report`;
+}
+
+export default async function DashboardReportPage() {
   const { client, gymId } = await requireSessionGym();
 
-  // Pull facts in parallel.
-  const [
-    config,
-    history,
-    leadsCount,
-    salesCount,
-    rfcCount,
-    cancelCount,
-    latestSnapshotAsOf,
-  ] = await Promise.all([
-    gymConfigsDb.getGymConfigJson(client, gymId),
-    importHistoryDb.listRecentImports(client, gymId, 50),
-    countRows(client, gymId, "leads"),
-    countRows(client, gymId, "sales"),
-    countRows(client, gymId, "rfc_entries"),
-    countRows(client, gymId, "cancellations"),
-    membersDb.getLatestSnapshotAsOf(client, gymId),
+  // Level-2 config — JSON file, not gym_configs table (v1).
+  const config = await loadGymConfig(POWERHOUSE_SLUG);
+
+  // Period bounds in the gym timezone (Level-2 from config).
+  const period = calendarMonthPeriod(PERIOD_KEY, config.timezone.value);
+  // YMD strings for the cancellations helper, which compares against the
+  // `cancel_date` column (a calendar date, not a timestamptz). Using the
+  // engine's own `localDateString` keeps this identical to how the engine
+  // formats period bounds internally — see lib/analytics/period.ts.
+  const fromYmd = localDateString(period.start, period.timezone);
+  const toYmd = localDateString(period.end, period.timezone);
+
+  // ---- Members snapshot (page-level filtering, per Phase 3A spec) ----
+  // 1. Find latest as_of for this gym.
+  // 2. Fetch the rows at that as_of.
+  // 3. Hand to engine.
+  const latestAsOf = await membersDb.getLatestSnapshotAsOf(client, gymId);
+  const memberRows = latestAsOf
+    ? await membersDb.getMembersAsOf(client, gymId, latestAsOf)
+    : [];
+
+  // ---- Other inputs in parallel ---------------------------------------
+  const [leadRows, saleRows, rfcRows, cancelRows] = await Promise.all([
+    // Engine filters leads by created_at locally and ALSO needs prior-month
+    // leads on the sale-attribution path (a sale in April can match a March
+    // lead). The helper paginates so we don't silently truncate at the
+    // PostgREST 1,000-row default cap.
+    leadsDb.getAllLeadsForGym(client, gymId),
+    salesDb.getSalesForMonth(client, gymId, period.start, period.end),
+    rfcEntriesDb.getRfcEntriesForMonth(client, gymId, period.start, period.end),
+    cancellationsDb.getCancellationsInPeriod(client, gymId, fromYmd, toYmd),
   ]);
 
-  // Members are snapshot rows; "row count" for the home tile is the size
-  // of the latest snapshot, not all snapshots ever.
-  const membersCount = latestSnapshotAsOf
-    ? await membersDb.countMembersAsOf(client, gymId, latestSnapshotAsOf)
-    : 0;
-
-  const counts: Record<string, number> = {
-    leads: leadsCount,
-    abc_sales: salesCount,
-    abc_members: membersCount,
-    abc_rfc: rfcCount,
-    cancel_ledger: cancelCount,
+  // Cast db Row[] to the engine's parser-row type. The engine reads
+  // only the fields that overlap with the Insert shape; extra columns
+  // (id, imported_at) are ignored. This is the seam where two row
+  // shapes meet and is the appropriate place for the cast.
+  const engineInput: EngineInput = {
+    gym_id: gymId,
+    period,
+    leads: leadRows as unknown as LeadRow[],
+    sales: saleRows as unknown as SaleRow[],
+    members_snapshot: memberRows as unknown as MemberRow[],
+    rfc_entries: rfcRows as unknown as RfcRow[],
+    cancellations: cancelRows as unknown as CancellationRow[],
+    prior_period_current_member_base: null,
   };
 
-  const successfulImports = history.filter(
-    (h) => h.format !== "unknown" && h.row_count > 0,
-  );
-  const lastImport = successfulImports[0] ?? null;
-  const isEmpty = successfulImports.length === 0;
+  const pack = runAnalytics(engineInput, config);
 
-  const locale = readLocaleFromConfig(config);
-
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Your data</h1>
-          <p className="text-sm text-muted-foreground">
-            What's currently imported into Pulsar.
-          </p>
-        </div>
-        <PeriodSelectorClient />
-      </div>
-
-      {isEmpty ? (
-        <EmptyState />
-      ) : (
-        <>
-          <LastImportBanner
-            filename={lastImport?.filename ?? null}
-            importedAt={lastImport?.imported_at ?? null}
-            locale={locale}
-          />
-          <SourceCounts counts={counts} latestSnapshotAsOf={latestSnapshotAsOf} locale={locale} />
-        </>
-      )}
-    </div>
-  );
-}
-
-async function countRows(
-  client: Awaited<ReturnType<typeof requireSessionGym>>["client"],
-  gymId: string,
-  table: "leads" | "sales" | "rfc_entries" | "cancellations",
-): Promise<number> {
-  // We deliberately query each table directly with a head-only count —
-  // these are cheap fact reads, not derived analytics. The lib/db helpers
-  // have monthly-window counts but no "all-time" count yet. This is the
-  // appropriate place to inline that since it's a one-line query.
-  const { error, count } = await client
-    .from(table)
-    .select("id", { count: "exact", head: true })
-    .eq("gym_id", gymId);
-  if (error) throw error;
-  return count ?? 0;
-}
-
-function EmptyState() {
-  return (
-    <Card>
-      <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-        <FileWarningIcon className="size-8 text-muted-foreground" />
-        <div className="space-y-1">
-          <div className="text-base font-medium">No data yet</div>
-          <p className="max-w-sm text-sm text-muted-foreground">
-            Import your first CSV file to start computing metrics. Pulsar
-            accepts the five standard exports — leads, sales, member
-            snapshot, RFC, and cancellations.
-          </p>
-        </div>
-        <ImportDialog>
-          <Button>Import your first file</Button>
-        </ImportDialog>
-      </CardContent>
-    </Card>
-  );
-}
-
-function LastImportBanner({
-  filename,
-  importedAt,
-  locale,
-}: {
-  filename: string | null;
-  importedAt: string | null;
-  locale: Locale;
-}) {
-  if (!filename || !importedAt) return null;
-  const dt = new Date(importedAt);
-  const fmt = new Intl.DateTimeFormat(locale.code, {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: locale.timeZone,
-  });
-  return (
-    <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm">
-      <CheckCircle2Icon className="size-4 shrink-0 text-emerald-600" />
-      <span className="text-muted-foreground">Last import:</span>
-      <span className="truncate font-medium">{filename}</span>
-      <Separator orientation="vertical" className="mx-1 h-4" />
-      <span className="text-muted-foreground">{fmt.format(dt)}</span>
-    </div>
-  );
-}
-
-function SourceCounts({
-  counts,
-  latestSnapshotAsOf,
-  locale,
-}: {
-  counts: Record<string, number>;
-  latestSnapshotAsOf: Date | null;
-  locale: Locale;
-}) {
-  const numberFmt = new Intl.NumberFormat(locale.code);
-  const dateFmt = new Intl.DateTimeFormat(locale.code, {
-    dateStyle: "medium",
-    timeZone: locale.timeZone,
-  });
+  // Header copy: gym name + period label, both Level-2/derived. Never
+  // hardcoded gym strings in components below this point.
+  const gymName = config._meta.gym_name ?? config._meta.gym_slug;
+  // Locale: read from config (BCP-47), default to "en-US". Powerhouse
+  // leaves it unset and rides the default; a future fr-CA gym sets
+  // config.locale = "fr-CA" and Intl.* formatting follows.
+  const locale = config.locale ?? "en-US";
+  const periodLabel = periodLabelFor(period.key, locale);
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Imported rows</CardTitle>
-        <CardDescription>
-          Per-source row counts across this gym's data.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
-          {SOURCES.map((s) => (
-            <div
-              key={s.format}
-              className="rounded-lg border bg-background/40 p-3"
-            >
-              <div className="text-xs font-medium uppercase text-muted-foreground">
-                {s.label}
-              </div>
-              <div className="mt-1 text-2xl font-semibold tabular-nums">
-                {numberFmt.format(counts[s.format] ?? 0)}
-              </div>
-              {s.format === "abc_members" && latestSnapshotAsOf && (
-                <div className="mt-0.5 text-xs text-muted-foreground">
-                  Snapshot · {dateFmt.format(latestSnapshotAsOf)}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
+    <DashboardView
+      pack={pack}
+      config={config}
+      gymName={gymName}
+      periodLabel={periodLabel}
+      locale={locale}
+    />
   );
 }

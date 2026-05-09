@@ -13,5 +13,5 @@ export type {
   Period,
   ValidationResult,
 } from "./types";
-export { calendarMonthPeriod } from "./period";
+export { calendarMonthPeriod, localDateString } from "./period";
 export { getAttributionModule } from "./modules/registry";

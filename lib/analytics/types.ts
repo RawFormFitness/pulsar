@@ -252,6 +252,10 @@ export type KnownGap = {
 export type GymConfig = {
   _meta: { gym_slug: string; gym_name?: string } & Record<string, unknown>;
   timezone: { value: string };
+  /** Optional BCP-47 locale tag for `Intl.*` formatting (e.g. "en-US",
+   * "fr-CA"). Read by the dashboard layer. Defaults to "en-US" when
+   * absent. Powerhouse leaves this unset. */
+  locale?: string;
   period: { type: string; boundary: string };
   channels: {
     reported: ChannelKey[];
