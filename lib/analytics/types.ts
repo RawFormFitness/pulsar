@@ -140,6 +140,24 @@ export type AnalyticsOutput = {
     /** Display-label-keyed dict (e.g. "Web Leads": 285 for Powerhouse April). */
     display: Record<string, number>;
     internal: Record<string, number> & { total_leads: number };
+    /** When true, the PDF report's per-channel lead split disagrees with
+     * the engine's spec-derived values for this period. The engine still
+     * emits its rule-derived numbers; this flag tells the dashboard to
+     * surface a reconciliation banner.
+     *
+     * Cascading note: the lead-generation gap is upstream of per-channel
+     * sales, conversion ratios, and per-channel velocity rows — those
+     * blocks are downstream of channel attribution and therefore inherit
+     * the variance. The dashboard surfaces the banner ONCE at the
+     * lead-generation section level, not per downstream tile. */
+    known_gap?: boolean;
+    /** When known_gap is true, the PDF-side counterpart values keyed by
+     * the same per-channel internal keys used in `internal`
+     * (e.g. "web_leads", "walk_in_leads", "total_leads"). Typed as a
+     * generic numeric map so a future gym with different reported
+     * channels works without a type change. Optional — present only when
+     * the gym's config records it. */
+    pdf_values?: Record<string, number>;
   };
   sales: {
     display: Record<string, number>;
@@ -289,6 +307,16 @@ export type GymConfig = {
        * prior lead regardless of channel". */
       non_preferred_channels?: ChannelKey[];
     };
+    /** Optional reconciliation marker. When the configured channel
+     * attribution rules are known to disagree with the gym's report-owner
+     * per-channel lead split for a specific period, this block surfaces
+     * the gap to the engine output (and ultimately to a dashboard
+     * banner). The engine still emits its rule-derived per-channel
+     * counts; this field is informational. The gap is surfaced ONLY when
+     * the period being computed matches `period_key`. The compound
+     * `pdf_value` payload (e.g. `{web_leads, walk_in_leads, total_leads}`)
+     * rides through the KnownGap shape's open index signature. */
+    _known_gap?: KnownGap;
   };
   member_status_values: {
     active_value: string;

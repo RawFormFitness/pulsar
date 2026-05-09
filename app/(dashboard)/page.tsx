@@ -2,6 +2,19 @@
 //
 // Phase 3A — STATIC April 2026 monthly report for Powerhouse NYC.
 //
+// TODO(Phase 3B priority): Before 3B's period selector lands, add
+// `lib/db/__tests__/phase_3a_e2e.integration.test.ts` that drives the
+// full CSV → import (lib/parsers + lib/import) → DB (hosted Supabase
+// or a test schema) → engine (runAnalytics) chain against the same
+// Powerhouse April fixtures and asserts the engine output matches
+// `lib/analytics/__tests__/fixtures/april_2026_expected.json`. The
+// existing engine acceptance test loads pre-shaped fixture rows and
+// bypasses lib/db/, so a regression in the data path (parser change,
+// upsert idempotency, RLS query helper) wouldn't be caught until the
+// dashboard renders wrong numbers in a browser. Wire as a separate
+// test target (e.g. `npm run test:integration`) since it touches the
+// real DB.
+//
 // What this page is, intentionally:
 //   * Server component. Fetches MetricsPack from the analytics-engine and
 //     hands it to <DashboardView />, which renders.

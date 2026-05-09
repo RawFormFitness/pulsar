@@ -229,3 +229,49 @@ test("April 2026 acceptance — known gap markers present in fixture (reconcilia
   assert.ok(gaps?.downstream_of_lead_count, "downstream gap must be recorded");
   assert.equal((expected.losses as Record<string, unknown>)["pending_cancel_known_gap"], true);
 });
+
+test("April 2026 acceptance — lead generation reconciliation marker", async () => {
+  // The engine must surface the channel_attribution._known_gap from the
+  // Powerhouse config onto AnalyticsOutput.lead_generation, parallel to
+  // how the pending-cancel gap is surfaced on losses. The dashboard
+  // reads these fields to render a section-level reconciliation banner.
+  const { input, config } = await buildPowerhouseAprilInput();
+  const out = runAnalytics(input, config);
+  const expected = await loadExpected();
+
+  // Boolean gate matches the fixture.
+  assert.equal(
+    out.lead_generation.known_gap,
+    (expected.lead_generation as Record<string, unknown>)["known_gap"],
+  );
+  assert.equal(out.lead_generation.known_gap, true);
+
+  // PDF-side per-channel values are surfaced as a Record<string, number>.
+  assert.ok(
+    out.lead_generation.pdf_values,
+    "pdf_values must be present when known_gap is true",
+  );
+  assert.equal(out.lead_generation.pdf_values?.["web_leads"], 279);
+  assert.equal(out.lead_generation.pdf_values?.["walk_in_leads"], 235);
+  assert.equal(out.lead_generation.pdf_values?.["total_leads"], 514);
+
+  // The engine still emits its rule-derived counts; the gap is the
+  // dashboard's signal, not a value override.
+  assert.equal(out.lead_generation.display["Web Leads"], 285);
+  assert.equal(out.lead_generation.display["Walk-in Leads"], 234);
+  assert.equal(out.lead_generation.display["Total Leads"], 519);
+});
+
+test("April 2026 acceptance — lead-gen gap does not bleed into other periods", async () => {
+  // The gap is period-scoped: a config block tagged "2026-04" must NOT
+  // surface a known_gap when the engine is run for a different period.
+  // Mirror the period-key gating that pending_cancel relies on.
+  const { input, config } = await buildPowerhouseAprilInput();
+  const otherPeriodInput = {
+    ...input,
+    period: { ...input.period, key: "2026-05" },
+  };
+  const out = runAnalytics(otherPeriodInput, config);
+  assert.equal(out.lead_generation.known_gap, false);
+  assert.equal(out.lead_generation.pdf_values, undefined);
+});

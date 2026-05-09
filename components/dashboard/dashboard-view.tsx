@@ -23,6 +23,7 @@ import {
   ReconciliationBanner,
   type ReconciliationBannerProps,
 } from "./reconciliation-banner";
+import { SectionReconciliationBanner } from "./section-reconciliation-banner";
 import { ValidationBanner, type ValidationFailure } from "./validation-banner";
 import { VelocityGrid } from "./velocity-grid";
 
@@ -75,6 +76,72 @@ export function DashboardView({
   // Lead Generation: tiles iterated from pack.lead_generation.display.
   const leadEntries = Object.entries(pack.lead_generation.display);
 
+  // Lead-generation reconciliation banner. Surfaced ONCE at the section
+  // level (between title and tile grid) when the engine flags
+  // `pack.lead_generation.known_gap`. The cascade copy explicitly tells
+  // the user that downstream sections (sales-by-channel, conversion,
+  // velocity) inherit this variance — that's why we don't add per-tile
+  // banners to those sections. Adding more would clutter and undermine
+  // the mental model that ONE upstream gap explains all downstream
+  // drift.
+  //
+  // Engine values come from pack.lead_generation.internal (keys like
+  // "web_leads", "walk_in_leads", "total_leads"). PDF values come from
+  // pack.lead_generation.pdf_values keyed identically. Display labels
+  // come from config.display_labels.lead_generation; missing entries
+  // fall back to the engine's default labels via the same chain the
+  // engine itself uses. NEVER hardcode "Web Leads"/"Walk-in Leads"/
+  // "Total Leads" copy here — a future gym can override.
+  //
+  // TODO(v2): plumb the doc URL through pack.lead_generation.doc_link
+  // (the engine could populate from `_known_gap.doc_link`, which
+  // already exists in the gym config). For v1 the URL is hardcoded to
+  // the GitHub blob path, mirroring the Pending Cancel banner.
+  let leadGenBanner: React.ReactNode = null;
+  if (
+    pack.lead_generation.known_gap &&
+    pack.lead_generation.pdf_values
+  ) {
+    const internal = pack.lead_generation.internal;
+    const pdfValues = pack.lead_generation.pdf_values;
+    const labels: Record<string, string> = {
+      web_leads:
+        config.display_labels?.lead_generation?.web_leads ?? "Web Leads",
+      walk_in_leads:
+        config.display_labels?.lead_generation?.walk_in_leads ??
+        "Walk-in Leads",
+      total_leads:
+        config.display_labels?.lead_generation?.total_leads ?? "Total Leads",
+    };
+    // Render the keys actually present on the PDF-values payload that the
+    // gym's config recorded, in the engine's emission order. A future gym
+    // whose `channels.reported` is e.g. ["web","phone"] gets `web_leads`
+    // + `phone_leads` rendered without a code change here.
+    const keys = Object.keys(pdfValues).filter((k) => k in internal);
+    const engineValues: Record<string, number> = {};
+    const pdfNumeric: Record<string, number> = {};
+    for (const k of keys) {
+      engineValues[k] = internal[k];
+      pdfNumeric[k] = pdfValues[k];
+    }
+    leadGenBanner = (
+      <SectionReconciliationBanner
+        title="PDF report shows different per-channel splits"
+        engineValues={engineValues}
+        pdfValues={pdfNumeric}
+        labels={labels}
+        order={keys}
+        cascadeNote="Downstream metrics — sales by channel, conversion ratios, velocity — inherit this variance."
+        // Absolute URL to the reconciliation note on GitHub. A relative
+        // path resolves against the route (e.g. /dashboard) and 404s.
+        // Repo is currently RawFormFitness/pulsar; if/when that changes
+        // (rename, fork) update in lockstep with the Pending Cancel
+        // banner's docHref.
+        docHref="https://github.com/RawFormFitness/pulsar/blob/main/docs/lead_generation_reconciliation.md"
+      />
+    );
+  }
+
   // Sales: tiles iterated from pack.sales.display.
   const salesEntries = Object.entries(pack.sales.display);
 
@@ -125,7 +192,7 @@ export function DashboardView({
       {failures.length > 0 ? <ValidationBanner failures={failures} /> : null}
 
       {/* Lead Generation */}
-      <MetricSection title="Lead Generation">
+      <MetricSection title="Lead Generation" banner={leadGenBanner}>
         {leadEntries.map(([label, value]) => (
           <MetricTile
             key={label}

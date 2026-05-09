@@ -48,6 +48,8 @@
     "_known_gap": true,
     "_engine_expected": { "Web Leads": 285, "Walk-in Leads": 234, "Total Leads": 519 },
     "_pdf_value": { "Web Leads": 279, "Walk-in Leads": 235, "Total Leads": 514 },
+    "known_gap": true,
+    "pdf_values": { "web_leads": 279, "walk_in_leads": 235, "total_leads": 514 },
     "Web Leads": 285,
     "Walk-in Leads": 234,
     "Total Leads": 519,

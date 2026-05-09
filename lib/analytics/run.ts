@@ -103,6 +103,47 @@ function buildPendingCancelGapFields(
   return out;
 }
 
+/** Reads `channel_attribution._known_gap` out of the gym config and turns
+ * it into the optional `known_gap` / `pdf_values` fields on the
+ * lead_generation output. Mirrors `buildPendingCancelGapFields` in
+ * pattern: period-scoped via `gap.period_key`, returns
+ * `{ known_gap: false }` when no gap is configured or the period
+ * doesn't match.
+ *
+ * Lead-gen differs from Pending Cancel in that the PDF value is a
+ * compound payload (a per-channel object such as
+ * `{ web_leads, walk_in_leads, total_leads }`), not a scalar. The
+ * helper narrows the unknown `pdf_value`:
+ *   - object whose values are all numbers -> copy through verbatim
+ *     (preserves whatever per-channel keys the gym recorded);
+ *   - bare number -> wrap as `{ total_leads: <n> }` since a scalar
+ *     PDF value at the lead-gen level is by convention the total;
+ *   - anything else -> emit `known_gap: true` with no `pdf_values`. */
+function buildLeadGenerationGapFields(
+  config: GymConfig,
+  periodKey: string,
+): { known_gap?: boolean; pdf_values?: Record<string, number> } {
+  const gap = config.channel_attribution?._known_gap;
+  if (!gap || gap.period_key !== periodKey) {
+    return { known_gap: false };
+  }
+  const out: { known_gap?: boolean; pdf_values?: Record<string, number> } = {
+    known_gap: true,
+  };
+  const pdfValue: unknown = gap.pdf_value;
+  if (typeof pdfValue === "number") {
+    out.pdf_values = { total_leads: pdfValue };
+  } else if (pdfValue && typeof pdfValue === "object" && !Array.isArray(pdfValue)) {
+    const entries = Object.entries(pdfValue as Record<string, unknown>);
+    if (entries.length > 0 && entries.every(([, v]) => typeof v === "number")) {
+      out.pdf_values = Object.fromEntries(
+        entries.map(([k, v]) => [k, v as number]),
+      );
+    }
+  }
+  return out;
+}
+
 function labelFor(
   channel: ChannelKey,
   bucket: keyof typeof DEFAULT_LABELS,
@@ -348,7 +389,22 @@ export function runAnalytics(
       period_end_iso: input.period.end.toISOString(),
       timezone: input.period.timezone,
     },
-    lead_generation: { display: leadDisplay, internal: leadInternal },
+    lead_generation: {
+      display: leadDisplay,
+      internal: leadInternal,
+      // Lead-generation reconciliation marker. When the gym's config
+      // declares its channel-attribution rules disagree with a known
+      // report-owner per-channel split FOR THIS PERIOD, surface that
+      // here so the dashboard can show a section-level reconciliation
+      // banner. The engine output values themselves are unchanged
+      // (always rule-derived counts); only the marker changes. Absent
+      // block, or block whose period_key does not match the period
+      // being processed -> false. This gap is upstream of per-channel
+      // sales, conversion, and per-channel velocity rows; the dashboard
+      // surfaces the banner once at this section level rather than per
+      // downstream tile.
+      ...buildLeadGenerationGapFields(config, input.period.key),
+    },
     sales: { display: salesDisplay, internal: salesInternal },
     conversion: {
       display: convDisplay,
