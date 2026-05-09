@@ -85,7 +85,7 @@ before(async () => {
   }
 });
 
-test("runImport — Cancel Report imports 148 rows under Alpha gym, scoped by gym_id", async (t) => {
+test("runImport — cancel ledger imports 132 rows under Alpha gym, scoped by gym_id", async (t) => {
   if (!sampleAvailable) return t.skip("sample data unavailable");
 
   const buf = await loadSample("Test_Cancel_Report.csv");
@@ -98,15 +98,15 @@ test("runImport — Cancel Report imports 148 rows under Alpha gym, scoped by gy
   });
 
   assert.equal(r.duplicate, false);
-  assert.equal(r.format, "abc_cancel");
-  assert.equal(r.rowCount, 148);
+  assert.equal(r.format, "cancel_ledger");
+  assert.equal(r.rowCount, 132);
 
   const { count: alphaCount, error: e1 } = await client
     .from("cancellations")
     .select("id", { count: "exact", head: true })
     .eq("gym_id", ALPHA_GYM);
   assert.equal(e1, null);
-  assert.equal(alphaCount, 148);
+  assert.equal(alphaCount, 132);
 
   // Multi-tenancy: nothing under Beta.
   const { count: betaCount } = await client
@@ -120,7 +120,7 @@ test("runImport — Cancel Report imports 148 rows under Alpha gym, scoped by gy
     .from("import_history")
     .select("*")
     .eq("gym_id", ALPHA_GYM)
-    .eq("format", "abc_cancel");
+    .eq("format", "cancel_ledger");
   assert.equal(history?.length, 1);
 });
 
@@ -142,15 +142,15 @@ test("runImport — re-importing the same file is a no-op (idempotent on source_
     .from("import_history")
     .select("*")
     .eq("gym_id", ALPHA_GYM)
-    .eq("format", "abc_cancel");
+    .eq("format", "cancel_ledger");
   assert.equal(history?.length, 1);
 
-  // Still 148 rows.
+  // Still 132 rows.
   const { count } = await client
     .from("cancellations")
     .select("id", { count: "exact", head: true })
     .eq("gym_id", ALPHA_GYM);
-  assert.equal(count, 148);
+  assert.equal(count, 132);
 });
 
 test("runImport — RFC sample imports 98 rows", async (t) => {

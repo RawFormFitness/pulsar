@@ -12,7 +12,7 @@ create table public.import_history (
   id              uuid primary key default gen_random_uuid(),
   gym_id          uuid not null references public.gyms(id) on delete cascade,
 
-  format          text not null,         -- e.g., 'leads', 'abc_sales', 'abc_members', 'abc_rfc', 'abc_cancel'
+  format          text not null,         -- e.g., 'leads', 'abc_sales', 'abc_members', 'abc_rfc', 'cancel_ledger'
   filename        text not null,
   storage_path    text,                  -- Supabase Storage path of the raw upload, if retained
   source_hash     text,                  -- sha256 of raw bytes for re-import detection

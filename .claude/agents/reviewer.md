@@ -61,7 +61,11 @@ Treat the methodology spec as **a worked example of one gym's config**, never as
 - Changes that would prevent reproducing `April_Output_Report.pdf` exactly when fed Powerhouse NYC's April 2026 source files.
 
 ### 6. PROJECT.md alignment
-- **PROJECT.md > spec PDF.** When the diff implements something from `Powerhouse_NYC_Methodology_Spec.pdf` that the **"Deviations from the spec PDF"** section in PROJECT.md overrides, that's a finding. Active deviation: cancellations are one number; v1 does **not** split into cancels vs revocations and does **not** parse reason text. Flag any `is_revocation`, `Revocations` metric, `revocations` column, or reason-text classifier.
+- **PROJECT.md > spec PDF.** When the diff implements something from `Powerhouse_NYC_Methodology_Spec.pdf` that the **"Deviations from the spec PDF"** section in PROJECT.md overrides, that's a finding.
+- Active deviations to enforce:
+  - **Losses split into four tiles** (Cancels, RFC, Revocations, Pending Cancel). Flag the inverse: any code that treats losses as a single Cancellations number, hardcodes the four tile labels outside `cancellations.losses_tiles` config, or hardcodes revocation-classification reason strings outside `cancellations.revocation_classification.revocation_substrings`. Reason text must be stored verbatim and classified at read time — flag any `is_revocation` column, `revocations` table, or storage-layer classification flag.
+  - **Member-status terminology — "Ok" not "Active."** Flag hardcoded `"Active"` literals in core code where `member_status_values.active_value` should be read instead.
+  - **Documented reconciliation variances are allowed.** Engine emits its rule-derived value; the gap is surfaced via the optional `_known_gap` block (period_key + engine_value + pdf_value + doc_link). Flag any reverse-engineered tweak to the engine algorithm intended to make the engine match the PDF — reconcile by updating data or report, not the algorithm.
 - Out-of-scope-for-v1 features sneaking in: class scheduling, billing, payments, member-facing app, live API integrations, multi-user roles within a gym, settings UI for editing config, AI features.
 - New dependencies that don't fit the stack (not Next.js 15, not Tailwind v4, not shadcn/ui, not Recharts, not Supabase, not Papaparse).
 - Patterns that contradict the agent contracts in `.claude/agents/` (each agent's "forbidden directories" section).

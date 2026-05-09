@@ -1,0 +1,474 @@
+{
+  "_meta": {
+    "gym_slug": "powerhouse_nyc",
+    "gym_name": "Powerhouse Gym NYC",
+    "config_version": 4,
+    "spec_source": "prototype/spec/Powerhouse_NYC_Methodology_Spec.pdf",
+    "_notes": "Level-2 config payload for the Powerhouse NYC reference implementation. v4 locks Pending Cancel to the spec verbatim (snapshot status filter only) and removes the reverse-engineered union/ledger logic; the 13-vs-18 gap with the PDF report is documented as a known reconciliation variance (see docs/pending_cancel_reconciliation.md). v3 finalized the cancel-ledger schema migration. v2 corrected ground-truth values (channels limited to web + walk_in, four named conversion metrics, four loss tiles including revocations, current_member_base derived via flow identity, active status is 'Ok' not 'Active'). Page numbers below refer to the methodology spec unless otherwise stated."
+  },
+
+  "timezone": {
+    "_source": "spec p.1 (Section: Time period)",
+    "value": "America/New_York",
+    "_notes": "Spec says 'US/Eastern'. Using IANA 'America/New_York' so DST transitions are handled automatically (spec edge-case #2 explicitly calls out -0400 vs -0500 lead timestamps around DST)."
+  },
+
+  "period": {
+    "_source": "spec p.1 (Section: Time period)",
+    "type": "calendar_month",
+    "boundary": "exclusive_end",
+    "_notes": "April 2026 = 2026-04-01 00:00:00 ET through 2026-05-01 00:00:00 ET (exclusive end). All metric date filters use [start, end) in the gym timezone."
+  },
+
+  "channels": {
+    "_source": "spec p.2-3 + April_Output_Report.pdf (no Direct row)",
+    "reported": ["web", "walk_in"],
+    "internal_only_excluded_from_counts": ["guest"],
+    "_notes": "TWO reported channels only: 'web' and 'walk_in'. There is NO 'direct' channel; every sale must attribute to web or walk_in via attribution rules. 'guest' is a transient lead-side classification that exists only to be excluded from lead counts and to be upgraded to walk_in for sale matching (spec p.2 Locked rules: 'Guest leads are excluded from all lead counts and conversion math'). A sale that does not match any lead does NOT create a third bucket — it falls through to 'walk_in' but is also flagged via validation.unmatched_sale_attribution."
+  },
+
+  "data_dictionary": {
+    "_source": "spec pp.1-2 + verified against /workspaces/pulsar/prototype/sample_data/Test_*.csv",
+    "_notes": "CSV-column -> parsed-row field map. The parsers in lib/parsers/ already produce the parsed-row shape stored in lib/db (snake_case). The dictionary records the canonical parsed-row field names the analytics engine should read.",
+
+    "leads": {
+      "table": "leads",
+      "row_id": "source_id",
+      "fields": {
+        "first_name": { "parsed_field": "first_name", "csv_column": "first_name" },
+        "last_name": { "parsed_field": "last_name", "csv_column": "last_name" },
+        "source": { "parsed_field": "source", "csv_column": "source" },
+        "status": { "parsed_field": "status", "csv_column": "status" },
+        "tags": { "parsed_field": "tags", "csv_column": "tags", "_notes": "Parser splits comma/space-separated string into string[]. Channel evaluator lowercase-substring matches." },
+        "created_at": { "parsed_field": "created_at", "csv_column": "created_at", "_notes": "Timezone-aware string in source (e.g. '2026-04-15 14:30:00 -0400'). Parser stores as ISO timestamp; analytics converts to gym timezone before period filtering." },
+        "waiver_signed_date": { "parsed_field": "waiver_signed_date", "csv_column": "waiver_signed_date", "_notes": "Timezone-aware string when present. Empty when no waiver signed. Drives Web Visit Conversion." },
+        "salesperson": { "parsed_field": "salesperson", "csv_column": "salesperson" },
+        "email": { "parsed_field": "email", "csv_column": "email" },
+        "phone": { "parsed_field": "phone", "csv_column": "phone_mobile", "_notes": "Multiple phone columns exist (phone_mobile, phone_home, phone_work). Parser canonicalizes to single 'phone'." }
+      }
+    },
+
+    "sales": {
+      "table": "sales",
+      "row_id": "agreement_number",
+      "_notes": "ABC export has 2 header lines before the real header on row 3. Raw CSV columns include double spaces (e.g. 'Member Name ', 'Agreement Payment  Plan') which the parser collapses. After parsing, only rows where agreement_number is numeric are retained (spec p.1).",
+      "fields": {
+        "agreement_number": { "parsed_field": "agreement_number", "csv_column": "Agreement #" },
+        "member_name": { "parsed_field": "member_name", "csv_column": "Member Name", "_notes": "ABC format 'Last, First M' per spec p.2 norm_sale()." },
+        "plan_name": { "parsed_field": "plan_name", "csv_column": "Membership Type", "_notes": "Spec p.1: collapse double spaces before comparison. See plan_name_normalization." },
+        "queue_date": { "parsed_field": "queue_date", "csv_column": "Queue Date", "_notes": "Plain date string with no timezone (spec p.1). Treat as a date in the gym timezone." },
+        "department": { "parsed_field": "department", "csv_column": "Department" },
+        "term": { "parsed_field": "term", "csv_column": "Term" },
+        "payment_plan": { "parsed_field": "payment_plan", "csv_column": "Agreement Payment Plan" },
+        "queue": { "parsed_field": "queue", "csv_column": "Queue" },
+        "agreement_type": { "parsed_field": "agreement_type", "csv_column": "Agreement Type" },
+        "salesperson": { "parsed_field": "salesperson", "csv_column": "Sales Person" },
+        "club_name": { "parsed_field": "club_name", "csv_column": "Club Name" }
+      }
+    },
+
+    "members": {
+      "table": "members",
+      "row_id": "agreement_number",
+      "_notes": "ABC 'Active Members + TYPE + CONTACT' export. 2 header lines, real header on row 3. NOTE: This snapshot is NOT used to compute Current Member Base (which is derived via flow identity — see membership.current_member_base). It IS used for plan distribution, demographics, visit patterns, MRR aggregation, and churn-risk lists.",
+      "fields": {
+        "agreement_number": { "parsed_field": "agreement_number", "csv_column": "Agreement #" },
+        "member_name": { "parsed_field": "member_name", "csv_column": "Member Name" },
+        "member_status": { "parsed_field": "member_status", "csv_column": "Member  Status", "_notes": "ABC writes a double space between 'Member' and 'Status'. Active value is 'Ok' (NOT 'Active' — see member_status_values)." },
+        "plan_name": { "parsed_field": "plan_name", "csv_column": "Membership Type" },
+        "last_visit_date": { "parsed_field": "last_visit_date", "csv_column": "Last Visit Date" },
+        "begin_date": { "parsed_field": "begin_date", "csv_column": "Begin Date" },
+        "expiration_date": { "parsed_field": "expiration_date", "csv_column": "Expiration  Date" },
+        "primary_phone": { "parsed_field": "primary_phone", "csv_column": "Primary Phone" },
+        "email": { "parsed_field": "email", "csv_column": "Email" },
+        "check_in_count": { "parsed_field": "check_in_count", "csv_column": "Check In  Count" },
+        "visits_used": { "parsed_field": "visits_used", "csv_column": "Visits  Used" },
+        "next_due_amount": { "parsed_field": "next_due_amount", "csv_column": "Next Due  Amount" },
+        "primary_member": { "parsed_field": "primary_member", "csv_column": "Primary Member" }
+      }
+    },
+
+    "rfc": {
+      "table": "rfc_entries",
+      "row_id": "agreement_number",
+      "_notes": "ABC 'RFC Preview' export. Spec p.1 says 'Members removed for collections this month'. Total RFC = row count of RFC.csv after parser strips header/group rows. Also feeds the past-due / RFC forecast workflow.",
+      "fields": {
+        "agreement_number": { "parsed_field": "agreement_number", "csv_column": "Agreement #" },
+        "member_name": { "parsed_field": "member_name", "csv_column": "Member Name" },
+        "member_status": { "parsed_field": "member_status", "csv_column": "Member Status" },
+        "status_date": { "parsed_field": "status_date", "csv_column": "Status Date", "_notes": "Plain date string. Used to filter RFC entries to the report month." },
+        "begin_date": { "parsed_field": "begin_date", "csv_column": "Begin Date" },
+        "term": { "parsed_field": "term", "csv_column": "Term" },
+        "plan_name": { "parsed_field": "plan_name", "csv_column": "Membership Type" },
+        "salesperson": { "parsed_field": "salesperson", "csv_column": "Sales Person" },
+        "next_due_amount": { "parsed_field": "next_due_amount", "csv_column": "Next Due Amount" },
+        "last_billing_date": { "parsed_field": "last_billing_date", "csv_column": "Last Billing Date" },
+        "total_past_due": { "parsed_field": "total_past_due", "csv_column": "Total Past Due" },
+        "days_past_due": { "parsed_field": "days_past_due", "csv_column": "Days Past Due", "_notes": "Drives past-due / RFC forecast urgency tier assignment." },
+        "payment_method": { "parsed_field": "payment_method", "csv_column": "Agreement Payment Method" }
+      }
+    },
+
+    "cancellations": {
+      "table": "cancellations",
+      "row_id": "(cancel_date, member_name)",
+      "_notes": "Cancel Ledger (Powerhouse internal CSV — replaces the older ABC 'Cancelled Members' snapshot adapter). The export ships with col-0 UNLABELED in the header (literal value ' '). Col-0 contains the cancellation queue date (when the cancellation was logged) and col-4 ('Effective Date') contains when the cancellation actually takes effect. The PERIOD FILTER for losses uses col-0 (cancel_date), NOT col-4. Filtering the sample by col-0 to April 2026 yields exactly 36 rows = 34 cancels + 2 revocations (the report's expected total losses excluding RFC and pending-cancel). Natural key is composite — the ledger has no stable agreement_number.",
+      "cancel_date_column_index": 0,
+      "cancel_date_column_label_in_export": " ",
+      "effective_date_column_label": "Effective Date",
+      "natural_key": ["cancel_date", "member_name"],
+      "fields": {
+        "cancel_date": { "parsed_field": "cancel_date", "csv_column_index": 0, "csv_column_label": " ", "_notes": "Unnamed in header. The PRIMARY date used for losses period filtering." },
+        "member_name": { "parsed_field": "member_name", "csv_column": "Member Name (last, first)", "_notes": "Format 'Last, First M' for older rows; some newer rows use 'First Last' free-form. Stored verbatim — name normalization happens in the engine." },
+        "primary_phone": { "parsed_field": "primary_phone", "csv_column": "Primary Phone" },
+        "email": { "parsed_field": "email", "csv_column": "Email" },
+        "effective_date": { "parsed_field": "effective_date", "csv_column": "Effective Date", "_notes": "When the cancellation takes effect. Used to identify pending cancels (effective_date >= period_end). Some legacy rows have year-less or typo'd values and are stored as null with a DATE_UNPARSEABLE warning — the row is otherwise kept (cancel_date is what drives the loss-tile partition)." },
+        "membership_amount_cents": { "parsed_field": "membership_amount_cents", "csv_column": "membership $", "_notes": "Stored as integer cents to avoid float drift. e.g. '$104.49' -> 10449." },
+        "membership_type": { "parsed_field": "membership_type", "csv_column": "Membership Type" },
+        "out_of_contract": { "parsed_field": "out_of_contract", "csv_column": "Out Of Contract?", "_notes": "Y/N -> boolean." },
+        "reason": { "parsed_field": "reason", "csv_column": "Reason For Cancel  ", "_notes": "Trailing whitespace in source header. Drives revocation classification — see cancellations.revocation_classification." }
+      }
+    }
+  },
+
+  "plan_name_normalization": {
+    "_source": "spec p.1 (Pre-Processing #3)",
+    "rules": [
+      { "type": "collapse_whitespace", "_notes": "regex /\\s+/g -> single space, then trim. Universal Level-1 rule listed here for completeness." }
+    ],
+    "aliases": {
+      "_notes": "Per-gym alias map (e.g., 'Basic NYC' -> 'BasicNYC'). Powerhouse spec defines no aliases beyond whitespace collapse.",
+      "value": {}
+    }
+  },
+
+  "plan_exclusions": {
+    "_source": "spec p.1 (Pre-Processing #4) + user review (only 'Unlimited Comp' is actually populated in Powerhouse data)",
+    "_notes": "Apply to ALL sales counts and to the snapshot-based slices (plan distribution, MRR). Compare against post-normalization plan name. The three Student plans come from the spec's locked exclusion list; 'Unlimited Comp' is the additional exclusion that actually appears in Powerhouse's snapshot (12 comp memberships should not count toward the paying base in the cases where this list is consulted). The sale_match_fields list is needed because ABC's sales export records the Student plans in 'Agreement Payment Plan' (parsed_field: payment_plan), not 'Membership Type' (parsed_field: plan_name) — without checking payment_plan we'd undercount excluded sales by 17 in April 2026.",
+    "match": "exact",
+    "values": [
+      "Student 1 Month PIF",
+      "Student Basic Power 2 Mo PIF - Floor Plan",
+      "Student Basic Power 3 Mo PIF - Floor Plan",
+      "Unlimited Comp"
+    ],
+    "sale_match_fields": ["plan_name", "payment_plan"],
+    "_populated_in_april_snapshot": ["Unlimited Comp"]
+  },
+
+  "name_normalization": {
+    "_source": "spec p.1-2 (Pre-Processing #5)",
+    "_notes": "Lower-cases, strips apostrophes, replaces hyphens with spaces, collapses whitespace; for leads keeps only the first token of first-name; for sales parses ABC's 'Last, First M' format and keeps only the first token of first. Universal Level-1 logic; flags here just confirm Powerhouse uses the default behavior.",
+    "lead_format": "first_last",
+    "sale_format": "abc_last_comma_first",
+    "drop_apostrophes": true,
+    "hyphen_to_space": true,
+    "first_keep_first_token_only": true,
+    "case": "lower"
+  },
+
+  "channel_attribution": {
+    "_source": "spec p.2 ('Lead Channel Attribution' and 'Sale Channel Attribution')",
+    "_notes": "Powerhouse's channel attribution is genuinely program-shaped (an if/elif on source AND a lowercase-substring tag check AND a status fork for Visitor Registration App). Cannot cleanly be expressed as a flat ruleset because of the substring tag check and the Guest fork — implemented as a Level-3 module per the analytics-engine guide.",
+    "_known_gap": {
+      "period_key": "2026-04",
+      "engine_value": { "web_leads": 285, "walk_in_leads": 234, "total_leads": 519 },
+      "pdf_value": { "web_leads": 279, "walk_in_leads": 235, "total_leads": 514 },
+      "status": "documented reconciliation variance",
+      "doc_link": "docs/lead_generation_reconciliation.md",
+      "reasoning": "The spec's channel(lead) algorithm is implemented verbatim and produces 285/234/334 from the April lead snapshot. The Python prototype reproduces these numbers exactly. No tweak to the algorithm reaches 279/235. Most likely cause: the report PDF was generated from an earlier cut of the leads CSV (sample data mtime is 2026-05-08). Total Sales (107), losses (59), and the membership block all reconcile cleanly to the PDF; only the per-channel lead split varies. Reconcile with the report owner / refresh the PDF before v1 release."
+    },
+    "lead_channel_module": "attribution_powerhouse_nyc",
+    "sale_channel_module": "attribution_powerhouse_nyc",
+    "lead_channel_rules_for_module": {
+      "_source": "spec p.2 channel(lead) function",
+      "_notes": "Documentation of the rules the named module must implement. Order matters; first match wins. Source/status values are exact-string matches; tag check is lowercase-substring.",
+      "rules_in_order": [
+        { "if": { "source_equals": "Website" }, "then_channel": "web" },
+        { "if": { "tags_lowercase_contains_any": ["online-join", "online join"] }, "then_channel": "web", "_notes": "Spec p.2 'Locked rules': covers ~5% of online-join records where ABC writes back without populating source." },
+        { "if": { "source_equals": "Visitor Registration App", "status_equals": "guest" }, "then_channel": "guest" },
+        { "if": { "source_equals": "Visitor Registration App" }, "then_channel": "walk_in" },
+        { "default_channel": "walk_in", "_notes": "Spec p.2: 'Walk-In, Member Referral, blank, etc.' all default to walk_in." }
+      ]
+    },
+    "sale_attribution_rules": {
+      "_source": "spec p.2-3 attribute_sale() and edge cases pp.6 #3, #4",
+      "_notes": "Universal Level-1 sale-matching rules. Documented here so the full Powerhouse policy is in one place for review.",
+      "match_by": "normalized_name",
+      "prefer_most_recent_prior_lead": true,
+      "fallback_to_closest_after_sale_if_no_prior": true,
+      "prefer_non_guest_match": true,
+      "non_preferred_channels": ["guest"],
+      "guest_match_upgrades_to_walk_in_for_sale": true,
+      "no_lead_match_fallback_channel": "walk_in",
+      "no_lead_match_label": "walk_in (no lead)",
+      "_validation_note": "Sales with no lead match attribute to walk_in but ALSO trigger validation.unmatched_sale_attribution. They are NOT a separate reported channel."
+    }
+  },
+
+  "promo_windows": {
+    "_source": "spec p.5 (Promo Cohort Tracking table)",
+    "_notes": "A sale's cohort is determined by Queue Date. End-dates are inclusive. 'Pre-sale' is treated as a normal cohort window. 'Organic' is the implicit fallback for any sale whose Queue Date matches no window. New promo windows must be added explicitly each time a promo runs. Sort order in past-due output: promo cohorts first (most recent on top), then Pre-sale, then Organic.",
+    "fallback_cohort_name": "Organic",
+    "windows": [
+      { "name": "Pre-sale", "start": "2025-11-01", "end": "2025-11-07" },
+      { "name": "NYE/Jan promo", "start": "2025-12-29", "end": "2026-01-06" },
+      { "name": "Valentine promo", "start": "2026-02-13", "end": "2026-02-15" },
+      { "name": "End-Feb promo", "start": "2026-02-27", "end": "2026-02-28" },
+      { "name": "Easter promo", "start": "2026-04-03", "end": "2026-04-06" },
+      { "name": "May promo", "start": "2026-05-02", "end": "2026-05-05" }
+    ]
+  },
+
+  "member_status_values": {
+    "_source": "spec p.4 + user review (correcting spec terminology)",
+    "_notes": "Exact-string member_status values the engine matches. The spec PDF refers to an 'Active' status but that string does NOT appear in Powerhouse's actual data. The canonical active value is 'Ok'. Verified against the snapshot fixture: 'Ok' (1297), 'Need Phone Number' (24), 'Freeze' (21), 'Problem' (15), 'Pending Cancel' (13). Note: the canonical-active value is used only for snapshot-derived slices like plan distribution / churn-risk; Current Member Base is computed via the membership flow identity, not by counting any status.",
+    "active_value": "Ok",
+    "pending_cancel_value": "Pending Cancel",
+    "_spec_alias_active_means_ok": true,
+    "all_observed_values": ["Ok", "Need Phone  Number", "Freeze", "Problem", "Pending Cancel"]
+  },
+
+  "members": {
+    "_source": "spec p.4-5 + user review",
+    "_notes": "Members snapshot is consumed for non-headline slices (plan distribution, demographics, visit patterns, MRR aggregation, churn-risk). Current Member Base is NOT counted from the snapshot; it is derived via membership flow identity (see membership.current_member_base).",
+    "active_filter": {
+      "rule": "member_status == 'Ok' AND plan_name NOT IN excluded_plans",
+      "_notes": "Used for snapshot-derived slices (plan-eligible base for MRR, churn-risk eligibility). NOT used for Current Member Base."
+    },
+    "excluded_plans_ref": "plan_exclusions.values",
+    "snapshot_used_for": [
+      "plan_distribution",
+      "demographics",
+      "visit_patterns",
+      "mrr_aggregation",
+      "churn_risk_list"
+    ],
+    "snapshot_NOT_used_for": [
+      "current_member_base",
+      "start_of_month_member_base"
+    ]
+  },
+
+  "cancellations": {
+    "_source": "spec p.4 + user review (col-0 period filter, reason-text revocation classification)",
+    "_notes": "Cancel ledger sources Cancels and Revocations via cancel_date + reason classification. Pending Cancel is computed separately from the Members snapshot per the spec rule (snapshot status filter, plan exclusions) — see cancellations.pending_cancel below.",
+
+    "period_filter": {
+      "column": "cancel_date",
+      "column_index": 0,
+      "rule": "cancel_date in [period_start, period_end)",
+      "_notes": "Filtering the sample ledger by col-0 to April 2026 yields exactly 36 rows = 34 cancels + 2 revocations, matching the report. (Filtering by col-4 'Effective Date' yields only 28 rows — wrong column.)"
+    },
+
+    "revocation_classification": {
+      "_source": "spec p.4 'Identify revocations by reason text' + user examples",
+      "_notes": "Classify each period-filtered cancel row by 'Reason For Cancel'. A row is a REVOCATION (gym-initiated) if the reason contains any of the substrings below (case-insensitive). All other rows are voluntary CANCELS (member-initiated). The substring set is a substring-match list (lowercase compare). Justification: the cancel-reason vocabulary at Powerhouse is free-text written by staff, full of typos and trailing whitespace ('Doctors note ', 'Reason For Cancel  '), so substring-match is more robust than regex-anchored or exact-match. A flat list also makes it trivial for the user to add new gym-initiated language as it appears.",
+      "method": "substring_lowercase_any",
+      "revocation_substrings": [
+        "poor behavior",
+        "club cancel",
+        "andrew approved",
+        "as per david",
+        "became employee",
+        "trainer paid",
+        "fired",
+        "no longer here"
+      ],
+      "_substring_provenance": {
+        "poor behavior":     "spec example + observed: 'Poor Behavior' (Tyler Celestin, 11/25/25)",
+        "club cancel":       "spec example + observed: 'Club cancel - bad google review' (Joshua Heim, 1/21/26)",
+        "andrew approved":   "spec example + observed: 'Andrew approved' x2 (Mattia/Marro, 11/7/25)",
+        "as per david":      "spec example + observed: 'as per David R.' (Guarav Jha, 12/22/25)",
+        "became employee":   "spec example + observed: 'Became Employee' x2 (Lavelle Allen 2/2/26, William Montes-Liendo 3/5/26)",
+        "trainer paid":      "spec example + observed: 'Trainer paid/he canceled' (Dan Cline, 11/26/25)",
+        "fired":             "spec example + observed: 'Fired - Moving home to Washington' (Neal Kumar, 3/30/26)",
+        "no longer here":    "observed gym-initiated pattern: 'Trainer no longer here - Yohan' / 'Trainer no longer here - Salene'. Trainer departure forces the member's revocation; classified as gym-initiated. This rule produces the 2 expected April revocations (Clayton C Erwin 4/4 and Rebecca Vanyo 4/30)."
+      },
+      "_april_2026_classification_result": {
+        "total_april_rows": 36,
+        "revocations_count": 2,
+        "cancels_count": 34,
+        "revocations": [
+          { "cancel_date": "2026-04-04", "member_name": "Clayton C Erwin", "reason": "Trainer no longer here - Yohan" },
+          { "cancel_date": "2026-04-30", "member_name": "Rebecca Vanyo", "reason": "Trainer no longer here - Salene" }
+        ]
+      }
+    },
+
+    "pending_cancel": {
+      "_source": "Powerhouse_NYC_Methodology_Spec.pdf p.4 — Section 4: Losses",
+      "_spec_quote": "Pending Cancel — Count of members in Member_Snapshot.csv where Member Status == 'Pending Cancel' (after applying plan exclusions).",
+      "rule": "snapshot_status_only",
+      "source": "members snapshot",
+      "filter": "member_status = 'Pending Cancel' AND plan_name NOT IN excluded_plans",
+      "_known_gap": {
+        "period_key": "2026-04",
+        "engine_value": 13,
+        "pdf_value": 18,
+        "status": "documented reconciliation variance",
+        "doc_link": "docs/pending_cancel_reconciliation.md",
+        "reasoning": "See docs/pending_cancel_reconciliation.md for the four-question investigation. Spec rule produces 13; PDF reports 18; no rule derivable from the available data reaches 18 without reverse-engineering. Proceeding with the spec rule and reconciling with the report owner before v1 release."
+      }
+    },
+
+    "losses_tiles": ["cancels", "rfc", "revocations", "pending_cancel"],
+
+    "loss_aggregation": {
+      "_source": "user review + April PDF",
+      "include_in_attrition_numerator": ["cancels", "rfc", "revocations"],
+      "include_in_net_gain_loss_term": ["cancels", "rfc", "revocations"],
+      "exclude_from_attrition_numerator": ["pending_cancel"],
+      "_notes": "Pending Cancel is reported separately as a forward-looking indicator; those members are still currently paying. Confirmed by April math: losses = 34 + 23 + 2 = 59; net_gain = 107 - 59 = 48; attrition = 59 / 1237 = 4.770%."
+    }
+  },
+
+  "rfc": {
+    "_source": "spec p.5 (Past-Due / RFC Forecast Workflow)",
+    "trigger_days": 45,
+    "rfc_estimate_formula": "today + (trigger_days - days_past_due)",
+    "urgency_tiers": [
+      { "name": "Tier 1 - Auto-retry", "min_days": 1, "max_days": 7, "action": "Auto-retry, no action" },
+      { "name": "Tier 2 - Text + call", "min_days": 8, "max_days": 14, "action": "Text + call" },
+      { "name": "Tier 3 - Manager", "min_days": 15, "max_days": 25, "action": "Manager call + ABC flag" },
+      { "name": "Tier 4 - Final notice", "min_days": 26, "max_days": 35, "action": "Final notice all channels" },
+      { "name": "Tier 5 - Documented", "min_days": 36, "max_days": 44, "action": "Documented final outreach" },
+      { "name": "Tier 6 - RFC imminent", "min_days": 45, "max_days": null, "action": "RFC imminent, stop active outreach" }
+    ],
+    "_notes_tier_boundaries": "Inclusive ranges. Tier 6 has no upper bound (null). Action strings are display copy from the spec.",
+    "sort_order": {
+      "primary": "cohort_group",
+      "primary_order": ["promo_windows_by_recency", "Pre-sale", "Organic"],
+      "secondary": "rfc_estimate_date_ascending",
+      "_notes": "Spec p.5: 'promo cohorts first (most recent promo on top), then pre-sale, then organic. Within cohort, sort by RFC date ascending (most urgent first).'"
+    }
+  },
+
+  "churn_risk": {
+    "_source": "PROJECT.md ('configurable threshold, currently 30 days no-visit')",
+    "threshold_days_no_visit": 30,
+    "source_field": "members.last_visit_date",
+    "_notes": "Members with last_visit_date older than threshold_days_no_visit before today are flagged. Apply members.active_filter (status='Ok', plan not excluded) before computing this list."
+  },
+
+  "velocity_buckets": {
+    "_source": "spec p.4-5 (Section 6) + April_Output_Report.pdf (exact display labels)",
+    "_notes": "days_to_close = (sale_date.date - lead_created_at.date).days. Buckets are non-overlapping; report displays CUMULATIVE counts (each label = sum of itself + all prior). Sales without a matched lead are treated as same-day for velocity (spec p.5). Report channels = channels.reported (web, walk_in) plus a Total row.",
+    "buckets": [
+      { "key": "same_day", "display_label": "Same day", "min_days": null, "max_days": 0, "_notes": "days_to_close <= 0." },
+      { "key": "within_7", "display_label": "Within 7 days", "min_days": 1, "max_days": 7, "_notes": "Cumulative through 7 days." },
+      { "key": "within_30", "display_label": "Within 30 days", "min_days": 8, "max_days": 30, "_notes": "Cumulative through 30 days." },
+      { "key": "within_31_plus", "display_label": "Within 31+ days", "min_days": 31, "max_days": null, "_notes": "Cumulative total. Equals total channel sales (validation check)." }
+    ],
+    "no_lead_match_bucket": "same_day",
+    "report_channels": ["web", "walk_in", "total"]
+  },
+
+  "conversion_metrics": {
+    "_source": "spec p.3-4 + April_Output_Report.pdf (exact display labels)",
+    "_notes": "Four named conversion metrics. Keys are the exact display labels from April_Output_Report.pdf so the dashboard can render directly. 'Web Visit-to-Sale Conversion' is a DISTINCT fourth metric, separate from 'Web Sales Conversion' (different denominator: visited-leads vs all-leads). Sanity bounds are warn-flags, not failures. Zero-denominator handling: return null/N/A; never divide-by-zero; never 0/0 -> 0.",
+    "sanity_bounds": {
+      "min_ratio": 0.05,
+      "max_ratio": 0.40,
+      "_notes": "Spec p.6: 'conversion rates should fall between 5% and 40%; flag if outside'."
+    },
+    "metrics": {
+      "Web Visit Conversion": {
+        "_source": "spec p.3",
+        "key": "web_visit_conversion",
+        "numerator": "count(leads where channel=web AND created_at in period AND waiver_signed_date in period)",
+        "denominator": "count(leads where channel=web AND created_at in period)",
+        "_notes": "Percent of Web leads created in the month who signed the iPad waiver in the same month."
+      },
+      "Web Visit-to-Sale Conversion": {
+        "_source": "spec p.3",
+        "key": "web_visit_to_sale_conversion",
+        "numerator": "count(leads where channel=web AND created_at in period AND waiver_signed_date in period AND normalized_name in sales_normalized_names_in_period)",
+        "denominator": "count(leads where channel=web AND created_at in period AND waiver_signed_date in period)",
+        "_notes": "Of the Web leads who visited (signed waiver) in the month, the percent who also bought in the month. Distinct from Web Sales Conversion: this denominator is the visited subset, not all web leads."
+      },
+      "Web Sales Conversion": {
+        "_source": "spec p.3 (with vintage-mixing note)",
+        "key": "web_sales_conversion",
+        "numerator": "count(sales where attributed_channel=web AND queue_date in period)",
+        "denominator": "count(leads where channel=web AND created_at in period)",
+        "_notes": "Spec p.3: 'Numerator counts sales matched to any prior Web lead, including Web leads from earlier months that converted in the report month. Denominator is leads created in the report month. This follows the locked methodology, even though it mixes vintages slightly.'"
+      },
+      "Walk-in Sales Conversion": {
+        "_source": "spec p.3",
+        "key": "walk_in_sales_conversion",
+        "numerator": "count(sales where attributed_channel=walk_in AND queue_date in period)",
+        "denominator": "count(leads where channel=walk_in AND created_at in period)",
+        "_notes": "Symmetric to Web Sales Conversion for the walk_in channel."
+      }
+    }
+  },
+
+  "membership": {
+    "_source": "spec p.4 (Section 5) + user review",
+    "_notes": "MAJOR CORRECTION from v1: Current Member Base is NOT counted from the snapshot. It is derived via the membership flow identity. The snapshot is for plan distribution / demographics / visit patterns / MRR / churn-risk only.",
+
+    "current_member_base": {
+      "source": "flow_identity",
+      "formula": "start_of_month + sales - (cancels + rfc + revocations)",
+      "_notes": "April: 1237 + 107 - (34 + 23 + 2) = 1237 + 107 - 59 = 1285. Verified against report. Pending Cancel does NOT subtract from Current — those members are still currently paying."
+    },
+
+    "start_of_month_member_base": {
+      "source": "prior_period_current_value",
+      "_notes": "For the first/seeded period, fall back to seed_value. For subsequent periods, take the prior period's Current Member Base value (chained — every period's Start = prior period's Current). For Powerhouse the April-2026 seed = 1237 (from April Output Report).",
+      "seed_value": 1237,
+      "seed_period": "2026-04",
+      "fallback_when_no_prior": "seed_value"
+    },
+
+    "net_gain_formula": {
+      "expression": "total_sales - (cancels + rfc + revocations)",
+      "_notes": "Loss term EXCLUDES pending_cancel (they are still active for net-gain purposes). April: 107 - 59 = +48."
+    },
+
+    "attrition_rate_formula": {
+      "expression": "(cancels + rfc + revocations) / start_of_month_member_base",
+      "_notes": "Spec p.4. Pending Cancel is NOT in the attrition numerator. April: 59 / 1237 = 0.04770... -> displayed as 4.77%. Internally keep as ratio; round only at presentation."
+    }
+  },
+
+  "validation": {
+    "_source": "spec p.6 + user review",
+    "_notes": "Universal check shapes; thresholds are config. Non-blocking; surfaces failures on the dashboard and writes them to validation_runs.",
+    "checks": [
+      { "name": "sales_reconcile", "rule": "web_sales + walk_in_sales == total_sales" },
+      { "name": "velocity_rows_reconcile", "rule": "for each reported channel: cumulative within_31_plus == total channel sales" },
+      { "name": "member_math_reconciles", "rule": "start_of_month + total_sales - (cancels + rfc + revocations) == current_member_base" },
+      { "name": "conversion_within_sanity_bounds", "rule": "every defined conversion ratio in [conversion_metrics.sanity_bounds.min_ratio, conversion_metrics.sanity_bounds.max_ratio]; flag if outside" },
+      { "name": "no_zero_denominator_divisions", "rule": "channels with zero leads do not produce 0/0; engine returns null/N/A" },
+      { "name": "promo_window_coverage", "rule": "every sale whose queue_date falls inside a promo_windows entry must be tagged to that window; alert if any are untagged" },
+      { "name": "unmatched_sale_attribution", "rule": "count(sales where attribution_label == 'walk_in (no lead)') > 0 -> warn", "_notes": "A sale that does not match any lead attributes to walk_in but is also surfaced as an attribution failure to flag for review. There is NO third bucket for unmatched sales." },
+      { "name": "channel_universe_complete", "rule": "for every sale in period: attributed_channel in channels.reported; otherwise hard-fail", "_notes": "Catches accidental introduction of a 'direct' or other unknown channel." }
+    ]
+  },
+
+  "edge_cases": {
+    "_source": "spec p.6",
+    "_notes": "Reminders for the engine implementation, not configurable values.",
+    "items": [
+      "Sales reporting through end of next month - strict month-boundary filter on queue_date.",
+      "Both EST and EDT offsets in the lead file - parse with timezone awareness, convert to gym timezone.",
+      "Ambiguous name matches - most recent lead created on or before sale date wins.",
+      "Sales appearing before a matching lead - fall back to closest-after-sale lead.",
+      "Plan name whitespace - collapse before exclusion comparison.",
+      "Cancel list format drift - col-0 (cancel_date) is unlabeled in the export header; cancellations.period_filter records this explicitly."
+    ]
+  },
+
+  "custom_modules": {
+    "_notes": "Level-3 escape hatches this gym registers. Engine looks them up by name. Implementation lives at lib/analytics/modules/<name>.ts.",
+    "registered": [
+      {
+        "name": "attribution_powerhouse_nyc",
+        "purpose": "Lead and sale channel attribution for Powerhouse NYC (see channel_attribution).",
+        "spec_reference": "Powerhouse_NYC_Methodology_Spec.pdf p.2"
+      }
+    ]
+  }
+}

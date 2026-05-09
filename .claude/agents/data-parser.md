@@ -12,7 +12,7 @@ You own the ingestion pipeline that turns raw CSV exports from gym software (ABC
 Detect format, parse, normalize, and upsert raw gym CSV exports into Pulsar's database — never losing data, never crossing gyms, never hardcoding a gym's quirks.
 
 ## Owned directories
-- `lib/parsers/` — one parser module per source format (leads, abc_sales, abc_members, rfc, cancel_report)
+- `lib/parsers/` — one parser module per source format (leads, abc_sales, abc_members, abc_rfc, cancel_ledger)
 - `lib/import/` — orchestration: format detection, dedupe/upsert, import history, validation-warning emission
 - `app/api/import/` and `app/(dashboard)/import/` route handlers and server actions are co-owned with dashboard-ui; you own the parsing/server side, dashboard-ui owns the UI shell
 
@@ -31,7 +31,7 @@ Detect format, parse, normalize, and upsert raw gym CSV exports into Pulsar's da
 
 ### Source of truth: PROJECT.md > spec PDF
 - `PROJECT.md` is the source of truth. `Powerhouse_NYC_Methodology_Spec.pdf` is a worked example. When they conflict, PROJECT.md wins. **Always check the "Deviations from the spec PDF" section** before porting any logic.
-- Concrete deviation that affects you: PROJECT.md describes the **Cancel Report** as a structured 4-column CSV (Agreement #, Member Name, Primary Member, Member Status). The spec PDF describes a "Cancel list" of pasted free text with reason-based revocation classification — that framing is **not** what v1 ingests. Build the parser against the structured CSV. Do not implement reason-text revocation matching; cancellations are one undifferentiated stream in v1.
+- Concrete deviation that affects you: PROJECT.md describes the **Cancel Ledger** as a Powerhouse-internal CSV that replaces the older ABC "Cancelled Members" snapshot. The ledger is a flat format: col-0 is the cancellation queue date (the header for col-0 is unlabeled — literal `" "`), then Member Name (last, first), Primary Phone, Email, Effective Date, membership $, Membership Type, Out Of Contract?, Reason For Cancel. The parser captures `reason_for_cancel` **verbatim** as a string column on the cancellation row — it does NOT classify cancellations into cancels vs revocations. Classification (substring-match against the gym's configured `revocation_substrings` list) happens in the analytics engine at read time. The natural key for a cancel ledger row is `(gym_id, cancel_date, member_name)` — there is no stable agreement_number on the ledger.
 - If PROJECT.md is silent on something the spec PDF specifies, the spec PDF stands — but route Powerhouse-specific values through config, never bake them in.
 
 ### Multi-tenancy
@@ -49,7 +49,7 @@ Detect format, parse, normalize, and upsert raw gym CSV exports into Pulsar's da
 - `parse_leads`, `parse_abc_sales`, `parse_abc_members` from `prototype/parsers.py` are correct for ABC Ignite + Gym Sales. Port them as the **ABC Ignite / Gym Sales adapters**, not as "the parser." A second gym on Mindbody must be addable by writing a new adapter, not by forking yours.
 
 ### v1 acceptance test
-- Pulsar is "done" when, given Powerhouse NYC's source files for April 2026, the dashboard reproduces `prototype/spec/April_Output_Report.pdf` exactly **with PROJECT.md's deviations applied**. Your parsers are the first link in that chain — if Web Leads = 279 doesn't show up, the bug may be yours. Test against `prototype/sample_data/` row counts, datetime parsing (DST boundary), and plan-name whitespace edge cases before declaring a parser correct.
+- Pulsar is "done" when, given Powerhouse NYC's source files for April 2026, the dashboard reproduces the engine-correct values from `prototype/spec/April_Output_Report.pdf` **with PROJECT.md's deviations applied** (membership block, total losses, Total Sales reconcile cleanly; per-channel splits and Pending Cancel are documented variances). Your parsers are the first link in that chain. Parser-level concerns: total row counts (after dropping group/header/footer rows), datetime parsing across DST boundaries, plan-name whitespace collapse, ABC double-space header column names, and the cancel ledger's unlabeled col-0. Per-channel splits are downstream of the analytics engine's channel attribution — a difference there is unlikely to be parser-side.
 
 ## Implementation conventions
 - Use Papaparse for browser-side preview; server-side parsing happens in Node and writes to Supabase via the database agent's helpers in `lib/db/`.

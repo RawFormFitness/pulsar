@@ -34,10 +34,10 @@ test("detectFormat — RFC sample is identified as 'abc_rfc'", async () => {
   assert.equal(r.confidence, "high");
 });
 
-test("detectFormat — Cancel sample is identified as 'abc_cancel'", async () => {
+test("detectFormat — Cancel ledger sample is identified as 'cancel_ledger'", async () => {
   const buf = await loadSample("Test_Cancel_Report.csv");
   const r = await detectFormat(buf);
-  assert.equal(r.format, "abc_cancel");
+  assert.equal(r.format, "cancel_ledger");
   assert.equal(r.confidence, "high");
 });
 

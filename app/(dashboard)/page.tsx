@@ -42,9 +42,7 @@ const SOURCES: { format: string; label: string }[] = [
   { format: "abc_sales", label: "Sales" },
   { format: "abc_members", label: "Members" },
   { format: "abc_rfc", label: "RFC" },
-  // PROJECT.md deviation: cancellations are one undifferentiated stream
-  // in v1. There is no separate "Revocations" row.
-  { format: "abc_cancel", label: "Cancellations" },
+  { format: "cancel_ledger", label: "Cancellations" },
 ];
 
 type Locale = { code: string; timeZone: string };
@@ -102,7 +100,7 @@ export default async function DashboardHome() {
     abc_sales: salesCount,
     abc_members: membersCount,
     abc_rfc: rfcCount,
-    abc_cancel: cancelCount,
+    cancel_ledger: cancelCount,
   };
 
   const successfulImports = history.filter(

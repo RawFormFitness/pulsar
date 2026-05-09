@@ -1,0 +1,108 @@
+{
+  "_meta": {
+    "gym_slug": "test_gym_b",
+    "gym_name": "Test Gym B (synthetic, configurability test only)",
+    "config_version": 1,
+    "_notes": "Synthetic Level-2 config used by lib/analytics/__tests__/test_gym_b.test.ts to prove the engine reads config — same engine, different channels, different conversion metrics, different velocity buckets, different exclusions, different active-status value, no Level-3 module. If this fixture's numbers come out right, configurability works."
+  },
+
+  "timezone": { "value": "America/Denver" },
+
+  "period": { "type": "calendar_month", "boundary": "exclusive_end" },
+
+  "channels": {
+    "reported": ["online", "phone", "referral"],
+    "internal_only_excluded_from_counts": []
+  },
+
+  "plan_exclusions": {
+    "match": "exact",
+    "values": ["Comp Membership", "Staff Plan"]
+  },
+
+  "channel_attribution": {
+    "lead_channel_module": null,
+    "sale_channel_module": null,
+    "sale_attribution_rules": {
+      "match_by": "normalized_name",
+      "prefer_most_recent_prior_lead": true,
+      "fallback_to_closest_after_sale_if_no_prior": true,
+      "prefer_non_guest_match": true,
+      "non_preferred_channels": [],
+      "guest_match_upgrades_to_walk_in_for_sale": false,
+      "no_lead_match_fallback_channel": "phone",
+      "no_lead_match_label": "phone (no lead)"
+    }
+  },
+
+  "member_status_values": {
+    "_notes": "Synthetic-fixture values. The literal string 'Active' does NOT appear in real ABC data — the canonical active value at Powerhouse is 'Ok' (see PROJECT.md deviation). 'Active'/'Pending' are used here only to prove the engine reads `active_value` / `pending_cancel_value` from config rather than hardcoding any string.",
+    "active_value": "Active",
+    "pending_cancel_value": "Pending"
+  },
+
+  "cancellations": {
+    "revocation_classification": {
+      "method": "substring_lowercase_any",
+      "revocation_substrings": ["banned"]
+    },
+    "pending_cancel": { "rule": "snapshot_status_only" },
+    "losses_tiles": ["cancels", "rfc", "revocations", "pending_cancel"],
+    "loss_aggregation": {
+      "include_in_attrition_numerator": ["cancels", "rfc", "revocations"],
+      "include_in_net_gain_loss_term": ["cancels", "rfc", "revocations"],
+      "exclude_from_attrition_numerator": ["pending_cancel"]
+    }
+  },
+
+  "velocity_buckets": {
+    "_notes": "Three buckets at different cuts than Powerhouse's four — proves the engine respects bucket geometry from config.",
+    "buckets": [
+      { "key": "same_week", "display_label": "Same week", "min_days": null, "max_days": 7 },
+      { "key": "within_14", "display_label": "Within 14 days", "min_days": 8, "max_days": 14 },
+      { "key": "within_15_plus", "display_label": "Within 15+ days", "min_days": 15, "max_days": null }
+    ],
+    "no_lead_match_bucket": "same_week",
+    "report_channels": ["online", "phone", "referral", "total"]
+  },
+
+  "conversion_metrics": {
+    "sanity_bounds": { "min_ratio": 0.0, "max_ratio": 1.0 },
+    "metrics": {
+      "Online Sales Conversion": {
+        "key": "online_sales_conversion",
+        "numerator": "count(sales where attributed_channel=online AND queue_date in period)",
+        "denominator": "count(leads where channel=online AND created_at in period)",
+        "_notes": "Key follows the <channel>_<formula> convention: the engine parses it as (channel='online', formula='sales_conversion'). This is the same universal formula Powerhouse uses for 'web_sales_conversion' / 'walk_in_sales_conversion' — proves the formula is channel-agnostic."
+      }
+    }
+  },
+
+  "membership": {
+    "current_member_base": { "source": "flow_identity" },
+    "start_of_month_member_base": {
+      "source": "prior_period_current_value",
+      "seed_value": 100,
+      "fallback_when_no_prior": "seed_value"
+    },
+    "net_gain_formula": { "expression": "total_sales - (cancels + rfc + revocations)" },
+    "attrition_rate_formula": { "expression": "(cancels + rfc + revocations) / start_of_month" }
+  },
+
+  "validation": {
+    "checks": [
+      { "name": "sales_reconcile", "rule": "online + phone + referral == total" },
+      { "name": "member_math_reconciles", "rule": "start + sales - losses == current" }
+    ]
+  },
+
+  "display_labels": {
+    "_notes": "Exercises the Level-2 display-label override path. Renames the totals-row keys so the engine cannot use its built-in 'Total Leads' / 'Total Sales' defaults — proves both that the override is honored AND that the defaults remain a fallback when other tiles do not set an override.",
+    "lead_generation": {
+      "total_leads": "All Leads"
+    },
+    "sales": {
+      "total_sales": "All Sales"
+    }
+  }
+}

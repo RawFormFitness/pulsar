@@ -1,12 +1,15 @@
 // lib/db/cancellations.ts
 //
-// Helpers for `cancellations` — Cancel Report rows.
+// Helpers for `cancellations` — Powerhouse cancel ledger rows.
 //
-// PROJECT.md deviation from the spec PDF:
-//   v1 does NOT split into cancels vs revocations and does NOT store reason
-//   text. The Cancel Report's date window is captured on import_history.
+// Schema (post-migration 0007): cancel_date, effective_date, member_name,
+// primary_phone, email, membership_amount_cents, membership_type,
+// out_of_contract, reason, raw. Natural key: (gym_id, cancel_date,
+// member_name).
 //
-// Natural key: (gym_id, agreement_number).
+// Loss-tile classification (cancels / revocations / pending-cancel) is the
+// analytics engine's job, not ours; this module just stores rows and
+// supports period-window reads.
 
 import type { DbClient } from "./client";
 import type { Database } from "./types";
@@ -16,65 +19,33 @@ export type CancellationInsert =
   Database["public"]["Tables"]["cancellations"]["Insert"];
 
 /**
- * All cancellations associated with a specific import_history row.
+ * Cancellations whose `cancel_date` falls in [from, to). The analytics
+ * engine reads this window and partitions it locally into the loss tiles.
  *
- * The Cancel Report has no per-row date column — the report header carries
- * the period, so monthly cancel counts come from the import that covers
- * that period. The analytics engine joins through import_history to know
- * which import to read.
+ * Inputs are date-only (YYYY-MM-DD) — the column itself is `date`, not
+ * `timestamptz`, so callers should pass calendar dates in the gym's
+ * timezone.
  */
-export async function getCancellationsForImport(
+export async function getCancellationsInPeriod(
   client: DbClient,
   gymId: string,
-  importId: string,
-): Promise<Cancellation[]> {
-  // No direct import_id FK on cancellations in v1 — we filter by the
-  // imported_at window of that import_history row. Callers that already
-  // know the window can use getCancellationsImportedInWindow directly.
-  const { data: imp, error: impErr } = await client
-    .from("import_history")
-    .select("imported_at")
-    .eq("gym_id", gymId)
-    .eq("id", importId)
-    .maybeSingle();
-  if (impErr) throw impErr;
-  if (!imp) return [];
-
-  // Imports for cancel reports are atomic; rows from this import will share
-  // imported_at within a small jitter. Use the import's imported_at as a
-  // tight window.
-  return getCancellationsImportedInWindow(
-    client,
-    gymId,
-    new Date(imp.imported_at),
-    new Date(new Date(imp.imported_at).getTime() + 60_000),
-  );
-}
-
-/**
- * Cancellations whose `imported_at` is in [from, to). Cheap because we have
- * no other date column on this table.
- */
-export async function getCancellationsImportedInWindow(
-  client: DbClient,
-  gymId: string,
-  from: Date,
-  to: Date,
+  from: string,
+  to: string,
 ): Promise<Cancellation[]> {
   const { data, error } = await client
     .from("cancellations")
     .select("*")
     .eq("gym_id", gymId)
-    .gte("imported_at", from.toISOString())
-    .lt("imported_at", to.toISOString())
-    .order("imported_at", { ascending: true });
+    .gte("cancel_date", from)
+    .lt("cancel_date", to)
+    .order("cancel_date", { ascending: true });
 
   if (error) throw error;
   return data ?? [];
 }
 
 /**
- * Bulk upsert keyed on (gym_id, agreement_number).
+ * Bulk upsert keyed on (gym_id, cancel_date, member_name).
  */
 export async function upsertCancellations(
   client: DbClient,
@@ -89,7 +60,7 @@ export async function upsertCancellations(
   const { error, count } = await client
     .from("cancellations")
     .upsert(stamped, {
-      onConflict: "gym_id,agreement_number",
+      onConflict: "gym_id,cancel_date,member_name",
       count: "exact",
     });
 
@@ -98,9 +69,8 @@ export async function upsertCancellations(
 }
 
 /**
- * Total count of cancellations stored for this gym. The analytics engine
- * uses this for the v1 "Cancellations" losses metric (one undifferentiated
- * stream per the deviation).
+ * Total count of cancellations stored for this gym across all periods.
+ * Used by the dashboard's "Cancellations imported" status tile.
  */
 export async function countCancellations(
   client: DbClient,

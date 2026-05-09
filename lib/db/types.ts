@@ -36,34 +36,49 @@ export type Database = {
     Tables: {
       cancellations: {
         Row: {
-          agreement_number: number
+          cancel_date: string
+          effective_date: string | null
+          email: string | null
           gym_id: string
           id: string
           imported_at: string
-          member_name: string | null
-          member_status: string | null
-          primary_member: string | null
+          member_name: string
+          membership_amount_cents: number | null
+          membership_type: string | null
+          out_of_contract: boolean | null
+          primary_phone: string | null
           raw: Json
+          reason: string | null
         }
         Insert: {
-          agreement_number: number
+          cancel_date: string
+          effective_date?: string | null
+          email?: string | null
           gym_id: string
           id?: string
           imported_at?: string
-          member_name?: string | null
-          member_status?: string | null
-          primary_member?: string | null
+          member_name: string
+          membership_amount_cents?: number | null
+          membership_type?: string | null
+          out_of_contract?: boolean | null
+          primary_phone?: string | null
           raw?: Json
+          reason?: string | null
         }
         Update: {
-          agreement_number?: number
+          cancel_date?: string
+          effective_date?: string | null
+          email?: string | null
           gym_id?: string
           id?: string
           imported_at?: string
-          member_name?: string | null
-          member_status?: string | null
-          primary_member?: string | null
+          member_name?: string
+          membership_amount_cents?: number | null
+          membership_type?: string | null
+          out_of_contract?: boolean | null
+          primary_phone?: string | null
           raw?: Json
+          reason?: string | null
         }
         Relationships: [
           {

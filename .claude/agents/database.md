@@ -30,7 +30,7 @@ Every domain table below has `gym_id uuid not null references gyms(id)` and an R
 - `sales` — ABC sale agreements. Natural key: `(gym_id, agreement_number)`. Includes `queue_date`, `member_name`, `plan_name`, `salesperson`, `club_name`, plus `raw jsonb`.
 - `members` — Active member snapshot rows. Natural key: `(gym_id, agreement_number)`. Snapshot-style: an `as_of` timestamp tracks the import that produced this row. Includes `member_status`, `plan_name`, `last_visit_date`, `mrr`, `check_in_count`, `raw jsonb`.
 - `rfc_entries` — Members removed for collections. Natural key: `(gym_id, agreement_number, status_date)` or equivalent.
-- `cancellations` — Parsed Cancel Report rows. Natural key: `(gym_id, agreement_number)`. Includes `member_name`, `primary_member`, `member_status`, plus `raw jsonb`. Per PROJECT.md's deviation, v1 does **not** split into cancels vs revocations and does **not** store reason text.
+- `cancellations` — Parsed Cancel Ledger rows. Natural key: `(gym_id, cancel_date, member_name)` — the ledger has no stable agreement_number; col-0 (cancel_date) is unlabeled in the export header. Columns: `cancel_date`, `member_name`, `primary_phone`, `email`, `effective_date`, `membership_amount_cents`, `membership_type`, `out_of_contract`, `reason`, plus `raw jsonb`. Reason text is stored verbatim; the analytics engine classifies rows into Cancels vs Revocations at read time using a config-driven substring list. The schema does NOT carry a `revocations` table or an `is_revocation` flag — classification is an engine concern, not a storage concern.
 - `promo_windows` — Per-gym promo cohorts: `gym_id`, `name`, `start_date`, `end_date`. (Powerhouse NYC's are config-driven; storing them as rows lets the UI manage them in v1.5.)
 - `validation_runs` — Output of validation checks per import: `gym_id`, `import_id`, `check_name`, `passed`, `details jsonb`.
 - `import_history` — One row per file imported: `gym_id`, `format`, `filename`, `row_count`, `warnings_count`, `imported_by`, `imported_at`, `source_hash` for re-import detection.
@@ -38,7 +38,8 @@ Every domain table below has `gym_id uuid not null references gyms(id)` and an R
 ## Non-negotiable rules
 
 ### Source of truth: PROJECT.md > spec PDF
-- `PROJECT.md` is the source of truth. `Powerhouse_NYC_Methodology_Spec.pdf` is a worked example. When they conflict, PROJECT.md wins. **Always check the "Deviations from the spec PDF" section** before adding a column or table. Example: do not add a `revocations` table or an `is_revocation` flag — v1's deviation collapses cancellations into one stream.
+- `PROJECT.md` is the source of truth. `Powerhouse_NYC_Methodology_Spec.pdf` is a worked example. When they conflict, PROJECT.md wins. **Always check the "Deviations from the spec PDF" section** before adding a column or table.
+- The canonical pattern for cancel classification: **store reason text verbatim, classify at read time** in the analytics engine via the gym's configured substring list. Do NOT add a `revocations` table, an `is_revocation` boolean, or any classification column at the storage layer — classification is config-driven and lives outside the schema.
 - The schema must support reproducing `April_Output_Report.pdf` *with deviations applied*, which is not byte-identical to the spec PDF. Read both before designing.
 
 ### Multi-tenancy is enforced at the database, not just in app code

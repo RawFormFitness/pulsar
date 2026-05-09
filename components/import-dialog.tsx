@@ -57,7 +57,7 @@ const FORMAT_OPTIONS: { value: string; label: string }[] = [
   { value: "abc_sales", label: "Sales (ABC Membership Sales)" },
   { value: "abc_members", label: "Member Snapshot (ABC Active Members)" },
   { value: "abc_rfc", label: "RFC (ABC Return for Collections)" },
-  { value: "abc_cancel", label: "Cancellations (ABC Cancelled Members)" },
+  { value: "cancel_ledger", label: "Cancel Ledger (Powerhouse internal)" },
 ];
 
 // "What metrics break if this format is missing?" — Level 1 universal
@@ -69,7 +69,7 @@ const MISSING_FORMAT_CONSEQUENCES: Record<string, string> = {
   abc_sales: "Sales counts and conversion rates can't compute.",
   abc_members: "Current member base, attrition, and net gain can't compute.",
   abc_rfc: "RFC losses and the past-due workflow can't render.",
-  abc_cancel: "Cancellations losses can't compute and net gain will be off.",
+  cancel_ledger: "Cancellations losses can't compute and net gain will be off.",
 };
 
 const FORMAT_LABEL: Record<string, string> = Object.fromEntries(

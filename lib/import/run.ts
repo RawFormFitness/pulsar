@@ -36,7 +36,7 @@ import { parseLeads } from "@/lib/parsers/leads";
 import { parseAbcSales } from "@/lib/parsers/abc_sales";
 import { parseAbcMembers } from "@/lib/parsers/abc_members";
 import { parseAbcRfc } from "@/lib/parsers/abc_rfc";
-import { parseAbcCancel } from "@/lib/parsers/abc_cancel";
+import { parseCancelLedger } from "@/lib/parsers/cancel_ledger";
 import type {
   CancellationRow,
   DetectedFormat,
@@ -106,7 +106,7 @@ type AnyParseResult =
   | ({ format: "abc_sales" } & ParseResult<SaleRow>)
   | ({ format: "abc_members" } & ParseResult<MemberRow>)
   | ({ format: "abc_rfc" } & ParseResult<RfcRow>)
-  | ({ format: "abc_cancel" } & ParseResult<CancellationRow>);
+  | ({ format: "cancel_ledger" } & ParseResult<CancellationRow>);
 
 async function runParser(
   format: Exclude<DetectedFormat, "unknown">,
@@ -123,8 +123,8 @@ async function runParser(
       return { format, ...(await parseAbcMembers(file, gymId, asOf)) };
     case "abc_rfc":
       return { format, ...(await parseAbcRfc(file, gymId)) };
-    case "abc_cancel":
-      return { format, ...(await parseAbcCancel(file, gymId)) };
+    case "cancel_ledger":
+      return { format, ...(await parseCancelLedger(file, gymId)) };
   }
 }
 
@@ -150,7 +150,7 @@ async function upsertParsed(
       const stripped = parsed.rows.map(({ gym_id: _g, ...r }) => r);
       return rfcDb.upsertRfcEntries(client, gymId, stripped);
     }
-    case "abc_cancel": {
+    case "cancel_ledger": {
       const stripped = parsed.rows.map(({ gym_id: _g, ...r }) => r);
       return cancellationsDb.upsertCancellations(client, gymId, stripped);
     }
@@ -229,22 +229,32 @@ async function computeDiff(
       const update = nums.filter((n) => existing.has(n)).length;
       return { wouldAdd: parsed.rows.length - update, wouldUpdate: update };
     }
-    case "abc_cancel": {
-      const nums = parsed.rows
-        .map((r) => r.agreement_number)
-        .filter((v): v is number => typeof v === "number");
-      if (nums.length === 0) return { wouldAdd: 0, wouldUpdate: 0 };
-      const existing = new Set<number>();
-      for (const batch of chunk(nums, DIFF_CHUNK)) {
+    case "cancel_ledger": {
+      // Composite key (cancel_date, member_name). Pull existing keys for
+      // the candidate cancel_date set, then locally intersect.
+      const pairs = parsed.rows
+        .map((r) => ({ cancel_date: r.cancel_date, member_name: r.member_name }))
+        .filter(
+          (p): p is { cancel_date: string; member_name: string } =>
+            typeof p.cancel_date === "string" &&
+            typeof p.member_name === "string",
+        );
+      if (pairs.length === 0) return { wouldAdd: 0, wouldUpdate: 0 };
+      const dates = Array.from(new Set(pairs.map((p) => p.cancel_date)));
+      const existing = new Set<string>();
+      for (const batch of chunk(dates, DIFF_CHUNK)) {
         const { data, error } = await client
           .from("cancellations")
-          .select("agreement_number")
+          .select("cancel_date,member_name")
           .eq("gym_id", gymId)
-          .in("agreement_number", batch);
+          .in("cancel_date", batch);
         if (error) throw error;
-        for (const r of data ?? []) existing.add(r.agreement_number);
+        for (const r of data ?? [])
+          existing.add(`${r.cancel_date}|${r.member_name}`);
       }
-      const update = nums.filter((n) => existing.has(n)).length;
+      const update = pairs.filter((p) =>
+        existing.has(`${p.cancel_date}|${p.member_name}`),
+      ).length;
       return { wouldAdd: parsed.rows.length - update, wouldUpdate: update };
     }
     case "abc_rfc": {

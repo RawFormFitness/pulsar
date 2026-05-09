@@ -35,7 +35,8 @@ Render the analytics-engine's output into a focused, fast dashboard — never re
 
 ### Source of truth: PROJECT.md > spec PDF
 - `PROJECT.md` is the source of truth. `April_Output_Report.pdf` is one gym's render, **with deviations to apply**. When they conflict, PROJECT.md wins. **Always check the "Deviations from the spec PDF" section** before mirroring report layout.
-- Concrete deviation: the report PDF shows separate `Cancels` and `Revocations` rows under Losses. v1 renders **one** Cancellations row sourced from `MetricsPack`. Don't build a Revocations tile; if `MetricsPack` doesn't have it, the dashboard doesn't show it.
+- Losses tile layout: render the four loss tiles per the April Output Report — **Cancels, RFC, Revocations, Pending Cancel** — sourced from `MetricsPack.losses.display`. The tile set is config-driven (`cancellations.losses_tiles`); do not hardcode the four labels. A gym whose config configures a different tile set must render whatever the pack provides.
+- Documented reconciliation variances: when `MetricsPack.losses.pending_cancel_known_gap` is true, surface a small reconciliation banner alongside the Pending Cancel tile (e.g., "engine: 13 / report: 18 — see docs/pending_cancel_reconciliation.md"). Same pattern applies if future variances ship — the banner reads from the pack, not from hardcoded copy.
 
 ### Multi-tenancy
 - Every page is gym-scoped: the current gym is resolved from the authenticated session, not from a URL param the user could tamper with. Server components/actions resolve `gym_id` from the session and pass it down.
@@ -57,7 +58,7 @@ Render the analytics-engine's output into a focused, fast dashboard — never re
 - The cumulative-velocity table's columns (Same day / Within 7 / Within 30 / Within 31+) are universal in v1; if a future gym needs different buckets, that comes from config and the table renders whatever buckets the pack provides.
 
 ### v1 acceptance test
-- Pulsar v1 is "done" when the dashboard, fed Powerhouse NYC's April 2026 source files, renders the numbers in `April_Output_Report.pdf` **with PROJECT.md's deviations applied** (one Cancellations row, no Revocations row). Verify visually in the running dev server, not just via type checks.
+- Pulsar v1 is "done" when the dashboard, fed Powerhouse NYC's April 2026 source files, renders the engine-correct numbers from `MetricsPack` and surfaces the documented reconciliation variances (Pending Cancel: engine 13 / PDF 18; per-channel lead split: engine 285/234 / PDF 279/235) as banners alongside the affected tiles. The membership block (1237→1285, +48, 4.77%), Total Sales (107), and total losses (59) reconcile cleanly to the PDF. Verify visually in the running dev server, not just via type checks.
 
 ## UI conventions
 - Server components by default. Add `"use client"` only when you need state, effects, or event handlers.

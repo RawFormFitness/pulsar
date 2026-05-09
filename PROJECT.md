@@ -36,7 +36,7 @@ Five source inputs per gym per import:
 2. **Sales** (ABC Ignite "Membership Sales by Sign Date") — grouped report, 2 header lines to skip, agreements grouped by club → salesperson
 3. **Member Snapshot** (ABC Ignite "Active Members") — grouped report, 2 header lines to skip, current active members with MRR data, last visit, check-in count
 4. **RFC** (ABC Ignite — members removed for collections) — grouped report; title row, club-number sub-header, real headers, then group-divider rows separating the data block. Parser uses the standard grouped-report engine to locate headers and skip group rows.
-5. **Cancel Report** (ABC Ignite — cancelled members) — grouped report, simple format, 4 columns: Agreement #, Member Name, Primary Member, Member Status
+5. **Cancel Ledger** (Powerhouse internal CSV — replaces the older ABC "Cancelled Members" snapshot) — flat format with one header row; col-0 is the cancellation queue date (header is unlabeled), then Member Name (last, first), Primary Phone, Email, Effective Date, membership $, Membership Type, Out Of Contract?, Reason For Cancel. The engine partitions ledger rows into Cancels (voluntary, eff in period) and Revocations (gym-initiated reason) via cancel_date + reason classification. Pending Cancel is computed separately from the Members snapshot per spec rule, not from the ledger — see the Pending Cancel deviation below.
 
 Working parsers for the three core CSVs are in `prototype/parsers.py`. They handle the grouped-report format (title rows, sub-headers attached as group context, footer totals dropped). RFC and Cancel parsers will be added.
 
@@ -53,7 +53,7 @@ Working parsers for the three core CSVs are in `prototype/parsers.py`. They hand
 - Lead Generation: Web Leads, Walk-in Leads, Total Leads
 - Sales: Web Sales, Walk-in Sales, Total Sales (after plan exclusions)
 - Conversion: Web Visit Conversion, Web Visit-to-Sale Conversion, Web Sales Conversion, Walk-in Sales Conversion
-- Losses: Cancellations, RFC, Pending Cancel
+- Losses: Cancels, RFC, Revocations, Pending Cancel
 - Membership: Start-of-Month Base, Current Member Base, Net Gain, Attrition Rate
 - Pipeline Velocity (cumulative): Same day / 7 days / 30 days / 31+ days, per channel
 
@@ -103,7 +103,15 @@ Working parsers for the three core CSVs are in `prototype/parsers.py`. They hand
 
 The methodology spec PDF is a worked example, not the final product spec. Where Pulsar's behavior intentionally diverges from the spec, we document it here. PROJECT.md takes precedence over the spec PDF when they conflict.
 
-- **Cancellations are not split into "cancels" vs "revocations."** The spec distinguishes member-initiated cancellations from gym-initiated revocations using free-text reason matching. Pulsar v1 treats all cancellations as one number — sourced directly from the Cancel Report CSV. Reason-based splits can be re-enabled later as a configurable feature when a gym's data reliably supports it.
+- **Member-status terminology — "Ok" not "Active."** The spec PDF refers to an "Active" member status, but the string "Active" does not appear in Powerhouse's actual data. The canonical active value is `"Ok"`. Config and engine code use `"Ok"`; the spec's "Active" is treated as a synonym in documentation only.
+
+- **Pending Cancel — engine follows spec rule (snapshot status='Pending Cancel' after plan exclusions), which produces 13 for April 2026.** The April Output Report PDF shows 18; the discrepancy is documented as a known gap and will be reconciled with the report owner before v1 release. Full investigation in `docs/pending_cancel_reconciliation.md`.
+
+- **Lead Generation per channel — engine produces 285 Web / 234 Walk-in for April 2026; PDF shows 279 / 235.** The spec's `channel(lead)` algorithm is implemented as a verified Python port; both the TypeScript engine and `prototype/dashboard_preview.py` produce identical 285/234/334 from the April lead snapshot. No tweak to the algorithm reaches 279/235. The sample CSVs were last updated 2026-05-08; the report PDF predates this. Most likely cause: report was generated from an earlier cut of the leads data. Total Sales (107), losses (59), and the membership block (1237→1285, +48, 4.77%) all reconcile cleanly to the PDF — only the per-channel lead split varies. Will be reconciled with the report owner / by refreshing the PDF before v1 release. Full investigation in `docs/lead_generation_reconciliation.md`.
+
+## Open architectural questions (deferred to v2)
+
+- **Gym-config storage source of truth.** v1 reads each gym's config from a JSON file under `config/gyms/<slug>.json` (committed to source control). The `gym_configs` Supabase table is provisioned in the schema but is not yet the canonical source — it's reserved for v2 multi-tenant runtime config (the eventual settings UI promised in "Out of scope for v1" will write to it). Migration path: when v2 ships, sync the JSON files into the table on first deploy, point the engine loader at the table, and treat the JSON files as a legacy bootstrap input. Until then: edit JSON, commit, deploy. Do NOT scatter config reads across both surfaces — the engine reads from JSON in v1, period.
 
 ## Reference docs
 

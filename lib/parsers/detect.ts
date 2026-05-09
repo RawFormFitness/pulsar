@@ -110,31 +110,36 @@ export async function detectFormat(input: ParserInput): Promise<DetectResult> {
     if (s > 0) candidates.push({ format: "abc_rfc", score: s, signals: sigs });
   }
 
-  // ---- ABC Cancel -----------------------------------------------------------
+  // ---- Cancel Ledger (Powerhouse internal) ---------------------------------
+  // Distinctive header: "Member Name (last, first)" + "Reason For Cancel"
+  // + "Effective Date". The first column is unlabeled (literal " ") which
+  // is the cancel_date. Title-row signal isn't available — this CSV has no
+  // title row, just the header on row 1.
   {
-    // Title is "Cancelled Members". The 4-column header is also distinctive:
-    // exactly 4 non-empty cells on row 2 with "Agreement #", "Member Name",
-    // "Primary Member", "Member  Status". We use both signals — title and
-    // the "exactly 4 columns" shape — so we don't false-positive on the
-    // Active Members report.
-    const titleHit = blob.includes("cancelled members");
     let shapeHit = false;
-    for (let i = 0; i < Math.min(5, grid.length); i++) {
+    let unnamedFirstCol = false;
+    for (let i = 0; i < Math.min(3, grid.length); i++) {
       const row = grid[i] ?? [];
       const lowered = row.map((c) => String(c ?? "").trim().toLowerCase());
-      const hasAgreement = lowered.some((c) => c.includes("agreement"));
-      const hasPrimary = lowered.some((c) => c.includes("primary member"));
-      const hasStatus = lowered.some((c) => c.replace(/\s+/g, " ").includes("member status"));
-      if (hasAgreement && hasPrimary && hasStatus) {
+      const hasMemberLastFirst = lowered.some((c) => c.includes("member name (last"));
+      const hasReason = lowered.some((c) => c.includes("reason for cancel"));
+      const hasEffective = lowered.some((c) => c.includes("effective date"));
+      if (hasMemberLastFirst && hasReason && hasEffective) {
         shapeHit = true;
+        // Cancel_date sits in col-0 with no header label. We treat the
+        // empty-first-cell signal as a confirmation, not a requirement —
+        // future ledgers may add a header for col-0 without breaking us.
+        unnamedFirstCol = lowered[0] === "" || lowered[0] === " ";
         break;
       }
     }
     const sigs: string[] = [];
-    if (titleHit) sigs.push("found 'Cancelled Members' in title row");
-    if (shapeHit) sigs.push("found 4-column Agreement/Primary Member/Member Status header");
-    const s = (titleHit ? 2 : 0) + (shapeHit ? 2 : 0);
-    if (s > 0) candidates.push({ format: "abc_cancel", score: s, signals: sigs });
+    if (shapeHit)
+      sigs.push("found cancel-ledger header (Member Name (last, first) + Reason For Cancel + Effective Date)");
+    if (unnamedFirstCol)
+      sigs.push("col-0 header is unlabeled (cancel_date)");
+    const s = (shapeHit ? 3 : 0) + (unnamedFirstCol ? 1 : 0);
+    if (s > 0) candidates.push({ format: "cancel_ledger", score: s, signals: sigs });
   }
 
   if (candidates.length === 0) {

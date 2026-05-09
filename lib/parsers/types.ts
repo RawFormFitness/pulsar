@@ -66,7 +66,7 @@ export const FORMATS = [
   "abc_sales",
   "abc_members",
   "abc_rfc",
-  "abc_cancel",
+  "cancel_ledger",
 ] as const;
 
 export type DetectedFormat = (typeof FORMATS)[number] | "unknown";
