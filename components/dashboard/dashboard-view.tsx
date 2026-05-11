@@ -36,6 +36,20 @@ export type DashboardViewProps = {
   periodLabel: string;
   /** BCP-47 locale for number/date formatting. */
   locale: string;
+  /** Optional slot rendered in the header's right side, next to the gym
+   * title. Used in Phase 3B for the period selector; future surfaces
+   * could put e.g. an export button here. This stays a generic slot so
+   * the view component doesn't grow a hard dependency on the selector. */
+  headerSlot?: React.ReactNode;
+  /** Did the page find a `members` snapshot at-or-before period.end? When
+   * false, the engine ran with an empty `members_snapshot` and any
+   * snapshot-derived metric (Pending Cancel, etc.) reads as 0 not because
+   * there are no pending-cancel members but because we have no
+   * observation for the period boundary. We surface that honestly in the
+   * Pending Cancel reconciliation banner copy — the suffix is constructed
+   * here, not in the engine, because explanatory copy is presentation
+   * concern, not a bug in MetricsPack. */
+  snapshotAvailable: boolean;
 };
 
 /** Build a one-line failure summary from a validation check's `details`
@@ -62,6 +76,8 @@ export function DashboardView({
   gymName,
   periodLabel,
   locale,
+  headerSlot,
+  snapshotAvailable,
 }: DashboardViewProps) {
   // ---- Validation banner -------------------------------------------------
   const failures: ValidationFailure[] = pack.validation_results
@@ -181,11 +197,14 @@ export function DashboardView({
   return (
     <div className="space-y-8">
       {/* Header */}
-      <header className="space-y-1">
-        <div className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-          {periodLabel}
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div className="space-y-1">
+          <div className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+            {periodLabel}
+          </div>
+          <h1 className="text-3xl font-semibold tracking-tight">{gymName}</h1>
         </div>
-        <h1 className="text-3xl font-semibold tracking-tight">{gymName}</h1>
+        {headerSlot ? <div className="shrink-0">{headerSlot}</div> : null}
       </header>
 
       {/* Validation banner — top of page, only when failures exist. */}
@@ -238,6 +257,20 @@ export function DashboardView({
             pack.losses.pending_cancel_known_gap &&
             typeof pack.losses.pending_cancel_pdf_value === "number"
           ) {
+            // When no `members` snapshot existed at-or-before period.end,
+            // Pending Cancel is structurally 0 — we have no observation,
+            // not a "real" gap. Surface that honestly. We use the
+            // periodLabel ("April 2026 Monthly Report") trimmed to the
+            // month-year fragment for compact copy ("at April 2026 period
+            // end"). The full label would read awkwardly inside the
+            // banner. If the periodLabel format changes, this trim does
+            // a graceful no-op (it just uses the whole label).
+            const periodMoniker = periodLabel
+              .replace(/\s+Monthly Report$/i, "")
+              .trim();
+            const suffix = !snapshotAvailable
+              ? `no snapshot available at ${periodMoniker} period end`
+              : undefined;
             const banner: ReconciliationBannerProps = {
               label,
               engineValue: value,
@@ -249,6 +282,7 @@ export function DashboardView({
               // this URL needs updating in lockstep.
               docHref:
                 "https://github.com/RawFormFitness/pulsar/blob/main/docs/pending_cancel_reconciliation.md",
+              suffix,
             };
             sideSlot = <ReconciliationBanner {...banner} />;
           }

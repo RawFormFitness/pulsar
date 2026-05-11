@@ -28,6 +28,12 @@ export type ReconciliationBannerProps = {
    * MUST be absolute — relative hrefs resolve against the current route
    * and 404 from /dashboard. */
   docHref?: string;
+  /** Optional contextual suffix appended to the engine/report line (before
+   * the doc link), e.g. an honest "no snapshot available at the period
+   * end" qualifier. Kept as free-form plain text — the caller composes
+   * the copy so we don't bake gym/period-specific semantics into this
+   * component. Rendered with a leading " — ". */
+  suffix?: string;
 };
 
 export function ReconciliationBanner({
@@ -35,6 +41,7 @@ export function ReconciliationBanner({
   engineValue,
   pdfValue,
   docHref,
+  suffix,
 }: ReconciliationBannerProps) {
   return (
     <Alert className="text-xs">
@@ -42,6 +49,7 @@ export function ReconciliationBanner({
       <AlertDescription>
         <span className="font-medium text-foreground">{label}:</span>{" "}
         engine {engineValue} / report {pdfValue}
+        {suffix ? <> — {suffix}</> : null}
         {docHref ? (
           <>
             {" "}

@@ -100,6 +100,48 @@ export async function upsertSales(
 }
 
 /**
+ * Distinct `queue_date` calendar-date strings (YYYY-MM-DD) for the gym,
+ * ascending. Returns the raw date strings — month-key derivation in the
+ * gym timezone is the caller's responsibility (see app/(dashboard)/_lib/
+ * periods.ts for the period-list projection).
+ *
+ * Why date strings and not pre-aggregated month keys: the DB stores
+ * `queue_date` as `timestamptz` (see `getSalesForMonth` comment), and the
+ * UTC calendar prefix of the stored instant can disagree with the gym-
+ * local month for timezones east of UTC. Returning raw dates lets the
+ * caller apply the same `localDateString(...)` projection the analytics
+ * engine uses, so the selector's period list cannot drift from the
+ * engine's period filter.
+ *
+ * Paginated — sales easily exceed the 1,000-row PostgREST cap. We select
+ * a single column to keep page weight low.
+ */
+// Scaling note: this is a full-table scan over `queue_date` for the gym.
+// Fine at Powerhouse's scale (~hundreds of sales/month), but a known
+// scaling cliff — revisit with a Postgres RPC (e.g. `select distinct
+// date_trunc('month', queue_date)`) or a materialized monthly-keys view
+// once any gym's `sales` row count exceeds ~50k.
+export async function listDistinctSaleDates(
+  client: DbClient,
+  gymId: string,
+): Promise<string[]> {
+  const rows = await paginate<{ queue_date: string | null }>(() =>
+    client
+      .from("sales")
+      .select("queue_date")
+      .eq("gym_id", gymId)
+      .order("queue_date", { ascending: true })
+      .order("id", { ascending: true }),
+  );
+  const seen = new Set<string>();
+  for (const r of rows) {
+    if (!r.queue_date) continue;
+    seen.add(r.queue_date.slice(0, 10));
+  }
+  return [...seen].sort();
+}
+
+/**
  * Cheap count of sales in a window. Uses the same calendar-date filtering
  * convention as `getSalesForMonth` — see that helper's comment for why.
  */

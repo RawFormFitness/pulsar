@@ -1,26 +1,14 @@
 // app/(dashboard)/page.tsx
 //
-// Phase 3A — STATIC April 2026 monthly report for Powerhouse NYC.
-//
-// TODO(Phase 3B priority): Before 3B's period selector lands, add
-// `lib/db/__tests__/phase_3a_e2e.integration.test.ts` that drives the
-// full CSV → import (lib/parsers + lib/import) → DB (hosted Supabase
-// or a test schema) → engine (runAnalytics) chain against the same
-// Powerhouse April fixtures and asserts the engine output matches
-// `lib/analytics/__tests__/fixtures/april_2026_expected.json`. The
-// existing engine acceptance test loads pre-shaped fixture rows and
-// bypasses lib/db/, so a regression in the data path (parser change,
-// upsert idempotency, RLS query helper) wouldn't be caught until the
-// dashboard renders wrong numbers in a browser. Wire as a separate
-// test target (e.g. `npm run test:integration`) since it touches the
-// real DB.
+// Phase 3B — monthly report with period selector.
 //
 // What this page is, intentionally:
 //   * Server component. Fetches MetricsPack from the analytics-engine and
 //     hands it to <DashboardView />, which renders.
-//   * Hardcoded to April 2026 + Powerhouse NYC. No period or gym selector.
-//     v1's only customer is Powerhouse, and the engine output for Apr 2026
-//     is the v1 acceptance test target.
+//   * Period comes from ?period=YYYY-MM. The server validates it against
+//     the gym's available periods (the set of months with any sales data).
+//     Missing / malformed / unknown -> silent fallback to the newest
+//     available period (see app/(dashboard)/_lib/periods.ts).
 //   * Reads the gym config from `config/gyms/powerhouse_nyc.json` via
 //     `fs.readFile`. PROJECT.md's "Open architectural questions" section
 //     declares JSON files the canonical source of config in v1; the
@@ -34,10 +22,30 @@
 //     render; they don't reach back to lib/db or lib/analytics.
 //   * Multi-tenancy: gymId is resolved from session via requireSessionGym().
 //     The page filters everything to that gym. We do NOT trust a slug
-//     from the URL or body.
+//     from the URL or body; ?period is the only URL-controlled input and
+//     it cannot leak across gyms (the available-period list is itself
+//     gym-scoped).
 //   * Members snapshot filtering happens HERE: the page calls
-//     getLatestSnapshotAsOf + getMembersAsOf, then passes the snapshot
-//     rows to the engine. The engine assumes a pre-filtered snapshot.
+//     getLatestSnapshotAsOfDate(period.end) + getMembersAsOf, then passes
+//     the snapshot rows to the engine. The engine assumes a pre-filtered
+//     snapshot.
+//
+// Snapshot cutoff at period.end:
+//   For historical periods (e.g. selecting April when we're sitting in
+//   May), feeding the engine the unconditionally-latest snapshot would
+//   leak post-period state into the report — members who moved into
+//   Pending Cancel AFTER the period ended would inflate that tile. We
+//   pin the snapshot cutoff to `period.end` (the gym-local exclusive end
+//   of the period, expressed as a UTC instant). See
+//   lib/db/members.ts → getLatestSnapshotAsOfDate for the timezone
+//   reasoning (informed by commit f67f068's queue_date fix).
+//
+//   Implication for thinly-populated data: if no snapshot exists at or
+//   before period.end, the engine sees an empty members_snapshot. Pending
+//   Cancel reads as 0, and the snapshot-derived slices for that period
+//   are unavailable. This is correct: we have no observation, so we
+//   report no observation rather than misattribute a future snapshot's
+//   state.
 
 import "server-only";
 
@@ -67,16 +75,15 @@ import type {
 } from "@/lib/parsers/types";
 import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { requireSessionGym } from "./_lib/session";
+import { listAvailablePeriods, resolvePeriodKey } from "./_lib/periods";
+import { DashboardPeriodSelector } from "./_components/dashboard-period-selector";
+import { DashboardEmptyState } from "./_components/dashboard-empty-state";
 
-// Phase 3A: hardcoded to April 2026 for the static acceptance render.
-// When period selection re-lands the value comes from the URL/state.
-const PERIOD_KEY = "2026-04";
-
-// Hardcoded gym slug. Multi-gym support in v1 still routes through one
-// gym at a time per session; this page assumes the session resolves to
-// the Powerhouse gym for now. If a future test gym is wired in, the
-// slug comes from gym_meta lookup keyed off session.gymId, not from a
-// URL param.
+// Hardcoded gym slug for v1's JSON-config lookup. Multi-gym support in v1
+// still routes through one gym at a time per session; the slug → config
+// mapping will move to a `gyms.config_slug` column in v2. For now the
+// dashboard's only customer is Powerhouse, and the slug is the same
+// across deployments.
 const POWERHOUSE_SLUG = "powerhouse_nyc";
 
 const CONFIG_DIR = resolve(process.cwd(), "config", "gyms");
@@ -90,7 +97,7 @@ async function loadGymConfig(slug: string): Promise<GymConfig> {
 }
 
 function periodLabelFor(periodKey: string, locale: string): string {
-  // "2026-04" -> "April 2026 Monthly Report" (per the user spec).
+  // "2026-04" -> "April 2026 Monthly Report".
   const [yearStr, monthStr] = periodKey.split("-");
   const date = new Date(Date.UTC(Number(yearStr), Number(monthStr) - 1, 1));
   const month = new Intl.DateTimeFormat(locale, {
@@ -100,14 +107,72 @@ function periodLabelFor(periodKey: string, locale: string): string {
   return `${month} ${yearStr} Monthly Report`;
 }
 
-export default async function DashboardReportPage() {
+/** Pull `period` out of the searchParams record, accepting both Next 14's
+ * resolved object and Next 15's Promise form. We hold the type loose
+ * here so this page works regardless of which form Next is currently
+ * shipping. */
+function readPeriodFromParams(
+  searchParams: Record<string, string | string[] | undefined> | undefined,
+): string | null {
+  const v = searchParams?.period;
+  if (typeof v === "string" && /^\d{4}-\d{2}$/.test(v)) return v;
+  if (Array.isArray(v) && v.length > 0) {
+    const first = v[0];
+    if (typeof first === "string" && /^\d{4}-\d{2}$/.test(first)) return first;
+  }
+  return null;
+}
+
+type PageProps = {
+  // Next 15 ships searchParams as a Promise. We `await` it below.
+  searchParams: Promise<
+    Record<string, string | string[] | undefined> | undefined
+  >;
+};
+
+export default async function DashboardReportPage({ searchParams }: PageProps) {
   const { client, gymId } = await requireSessionGym();
 
   // Level-2 config — JSON file, not gym_configs table (v1).
   const config = await loadGymConfig(POWERHOUSE_SLUG);
 
+  const gymName = config._meta.gym_name ?? config._meta.gym_slug;
+  const locale = config.locale ?? "en-US";
+
+  // ---- Resolve the period from the URL --------------------------------
+  // 1. Enumerate periods the gym has sales for (one DB roundtrip).
+  // 2. Read ?period= and validate. Missing / malformed / unknown -> silent
+  //    fallback to newest (per Phase 3B decision).
+  const available = await listAvailablePeriods(client, gymId, locale);
+  const resolvedParams = await searchParams;
+  const requestedPeriod = readPeriodFromParams(resolvedParams);
+  const resolvedKey = resolvePeriodKey(available, requestedPeriod);
+
+  // Selector renders even on the empty-state path so the user can switch
+  // away from a typo'd URL with one click. When `available` is empty the
+  // selector renders an inert "No periods available" pill (its own
+  // empty-state).
+  const selector = (
+    <DashboardPeriodSelector
+      options={available}
+      value={resolvedKey ?? ""}
+    />
+  );
+
+  if (!resolvedKey) {
+    // No sales data at all for this gym — first-time setup, or a gym whose
+    // imports haven't landed yet.
+    return (
+      <DashboardEmptyState
+        gymName={gymName}
+        hasAnyData={false}
+        headerSlot={selector}
+      />
+    );
+  }
+
   // Period bounds in the gym timezone (Level-2 from config).
-  const period = calendarMonthPeriod(PERIOD_KEY, config.timezone.value);
+  const period = calendarMonthPeriod(resolvedKey, config.timezone.value);
   // YMD strings for the cancellations helper, which compares against the
   // `cancel_date` column (a calendar date, not a timestamptz). Using the
   // engine's own `localDateString` keeps this identical to how the engine
@@ -115,11 +180,15 @@ export default async function DashboardReportPage() {
   const fromYmd = localDateString(period.start, period.timezone);
   const toYmd = localDateString(period.end, period.timezone);
 
-  // ---- Members snapshot (page-level filtering, per Phase 3A spec) ----
-  // 1. Find latest as_of for this gym.
-  // 2. Fetch the rows at that as_of.
-  // 3. Hand to engine.
-  const latestAsOf = await membersDb.getLatestSnapshotAsOf(client, gymId);
+  // ---- Members snapshot (page-level filtering) ------------------------
+  // Cutoff is `period.end` (gym-local exclusive end as a UTC instant).
+  // See header comment for the timezone reasoning; see
+  // lib/db/members.ts → getLatestSnapshotAsOfDate for the helper.
+  const latestAsOf = await membersDb.getLatestSnapshotAsOfDate(
+    client,
+    gymId,
+    period.end,
+  );
   const memberRows = latestAsOf
     ? await membersDb.getMembersAsOf(client, gymId, latestAsOf)
     : [];
@@ -152,14 +221,6 @@ export default async function DashboardReportPage() {
   };
 
   const pack = runAnalytics(engineInput, config);
-
-  // Header copy: gym name + period label, both Level-2/derived. Never
-  // hardcoded gym strings in components below this point.
-  const gymName = config._meta.gym_name ?? config._meta.gym_slug;
-  // Locale: read from config (BCP-47), default to "en-US". Powerhouse
-  // leaves it unset and rides the default; a future fr-CA gym sets
-  // config.locale = "fr-CA" and Intl.* formatting follows.
-  const locale = config.locale ?? "en-US";
   const periodLabel = periodLabelFor(period.key, locale);
 
   return (
@@ -169,6 +230,16 @@ export default async function DashboardReportPage() {
       gymName={gymName}
       periodLabel={periodLabel}
       locale={locale}
+      headerSlot={selector}
+      // Whether a `members` snapshot existed at-or-before period.end. The
+      // Pending Cancel banner uses this to append "no snapshot available
+      // at <period> period end" when the engine ran with an empty
+      // members_snapshot — distinguishing "we have no observation" from
+      // "engine and PDF genuinely disagree." Dashboard-side because
+      // explanatory copy is presentation concern; the engine's contract
+      // (run with whatever snapshot you're given) doesn't need to grow
+      // an explanation channel for the report layer's benefit.
+      snapshotAvailable={latestAsOf !== null}
     />
   );
 }

@@ -56,6 +56,55 @@ export async function getLatestSnapshotAsOf(
 }
 
 /**
+ * Latest snapshot whose `as_of` is strictly before `asOf` (exclusive of
+ * period.end). Returns null when no snapshot satisfies the bound.
+ *
+ * Why this exists (Phase 3B): when the dashboard selects a historical
+ * period (e.g. April 2026), feeding the engine the unconditionally-latest
+ * snapshot is a silent correctness bug — the snapshot may have been taken
+ * weeks AFTER the period ended, capturing member-state changes (status
+ * flips, plan changes, churn) that occurred outside the reporting window.
+ * Powerhouse's Pending Cancel count for April should reflect the snapshot
+ * in force at period boundary, not whatever snapshot we happen to have
+ * imported since.
+ *
+ * Timezone caveat (informed by commit f67f068's queue_date fix):
+ *   We compare on `as_of` (timestamptz) using `asOf.toISOString()`. The
+ *   caller is responsible for passing the correct UTC instant. For
+ *   period-end cutoffs, hand in `period.end` directly — it's already a
+ *   UTC `Date` whose instant equals the gym-local exclusive end of the
+ *   period (computed via `calendarMonthPeriod` honoring the gym's IANA
+ *   timezone). DO NOT slice it to a YMD string first; that would lose the
+ *   hour-of-day component and select snapshots that fall on the boundary
+ *   date but AFTER the gym-local period end. e.g., for April 2026 in
+ *   America/New_York, period.end = 2026-05-01T04:00:00Z; a snapshot
+ *   taken at 2026-05-01T06:00:00Z is post-period and must be excluded.
+ *
+ * Boundary semantics: the bound is EXCLUSIVE (`< asOf`), matching the
+ * same correctness pattern as commit f67f068's queue_date fix. A
+ * `period.end` is the exclusive end of the period (start-of-next-month in
+ * the gym's timezone), so a snapshot taken at exactly that instant is
+ * already post-period and must be excluded.
+ */
+export async function getLatestSnapshotAsOfDate(
+  client: DbClient,
+  gymId: string,
+  asOf: Date,
+): Promise<Date | null> {
+  const { data, error } = await client
+    .from("members")
+    .select("as_of")
+    .eq("gym_id", gymId)
+    .lt("as_of", asOf.toISOString())
+    .order("as_of", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data ? new Date(data.as_of) : null;
+}
+
+/**
  * Members whose `last_visit_date` is older than `cutoff` in the latest
  * snapshot. Powers the churn-risk action layer (configurable threshold,
  * default 30 days set per-gym in gym_configs.config).
