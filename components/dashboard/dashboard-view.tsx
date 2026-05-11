@@ -26,6 +26,12 @@ import {
 import { SectionReconciliationBanner } from "./section-reconciliation-banner";
 import { ValidationBanner, type ValidationFailure } from "./validation-banner";
 import { VelocityGrid } from "./velocity-grid";
+import {
+  ChartToggleBody,
+  ChartToggleHeaderButton,
+  SectionChartToggleProvider,
+} from "./section-chart-toggle";
+import { SeriesProvider } from "./series-context";
 
 export type DashboardViewProps = {
   pack: AnalyticsOutput;
@@ -50,6 +56,14 @@ export type DashboardViewProps = {
    * here, not in the engine, because explanatory copy is presentation
    * concern, not a bug in MetricsPack. */
   snapshotAvailable: boolean;
+  /** Optional slot rendered (invisibly) inside the SeriesProvider so its
+   * resolution can push data into the provider's store. The page wraps
+   * its <SeriesHydrator /> in <Suspense> so the primary tile content
+   * streams first; once the chart series resolves the slot mounts and
+   * the in-section toggles flip from "Loading trend..." to the rendered
+   * chart. Optional so callers without chart series (tests, edge
+   * cases) keep working with tile-only output. */
+  seriesSlot?: React.ReactNode;
 };
 
 /** Build a one-line failure summary from a validation check's `details`
@@ -78,6 +92,7 @@ export function DashboardView({
   locale,
   headerSlot,
   snapshotAvailable,
+  seriesSlot,
 }: DashboardViewProps) {
   // ---- Validation banner -------------------------------------------------
   const failures: ValidationFailure[] = pack.validation_results
@@ -210,29 +225,54 @@ export function DashboardView({
       {/* Validation banner — top of page, only when failures exist. */}
       {failures.length > 0 ? <ValidationBanner failures={failures} /> : null}
 
+      <SeriesProvider initial={{ status: "pending" }}>
+      {/* Suspended series hydrator. The four chart-enabled sections
+       * below read from this provider via context. While the series
+       * is pending the toggles still work; switching to chart view
+       * shows a "Loading trend..." placeholder until the hydrator
+       * resolves. */}
+      {seriesSlot ?? null}
+
       {/* Lead Generation */}
-      <MetricSection title="Lead Generation" banner={leadGenBanner}>
-        {leadEntries.map(([label, value]) => (
-          <MetricTile
-            key={label}
-            label={label}
-            value={value}
-            locale={locale}
-          />
-        ))}
-      </MetricSection>
+      <SectionChartToggleProvider seriesKey="lead_generation" locale={locale}>
+        <MetricSection
+          title="Lead Generation"
+          banner={leadGenBanner}
+          headerSlot={<ChartToggleHeaderButton />}
+          bodyClassName=""
+        >
+          <ChartToggleBody>
+            {leadEntries.map(([label, value]) => (
+              <MetricTile
+                key={label}
+                label={label}
+                value={value}
+                locale={locale}
+              />
+            ))}
+          </ChartToggleBody>
+        </MetricSection>
+      </SectionChartToggleProvider>
 
       {/* Sales */}
-      <MetricSection title="Sales">
-        {salesEntries.map(([label, value]) => (
-          <MetricTile
-            key={label}
-            label={label}
-            value={value}
-            locale={locale}
-          />
-        ))}
-      </MetricSection>
+      <SectionChartToggleProvider seriesKey="sales" locale={locale}>
+        <MetricSection
+          title="Sales"
+          headerSlot={<ChartToggleHeaderButton />}
+          bodyClassName=""
+        >
+          <ChartToggleBody>
+            {salesEntries.map(([label, value]) => (
+              <MetricTile
+                key={label}
+                label={label}
+                value={value}
+                locale={locale}
+              />
+            ))}
+          </ChartToggleBody>
+        </MetricSection>
+      </SectionChartToggleProvider>
 
       {/* Conversion */}
       <MetricSection title="Conversion">
@@ -248,76 +288,94 @@ export function DashboardView({
       </MetricSection>
 
       {/* Losses */}
-      <MetricSection title="Losses">
-        {lossesEntries.map(([label, value]) => {
-          const isPendingCancel = label === pendingCancelLabel;
-          let sideSlot: React.ReactNode = null;
-          if (
-            isPendingCancel &&
-            pack.losses.pending_cancel_known_gap &&
-            typeof pack.losses.pending_cancel_pdf_value === "number"
-          ) {
-            // When no `members` snapshot existed at-or-before period.end,
-            // Pending Cancel is structurally 0 — we have no observation,
-            // not a "real" gap. Surface that honestly. We use the
-            // periodLabel ("April 2026 Monthly Report") trimmed to the
-            // month-year fragment for compact copy ("at April 2026 period
-            // end"). The full label would read awkwardly inside the
-            // banner. If the periodLabel format changes, this trim does
-            // a graceful no-op (it just uses the whole label).
-            const periodMoniker = periodLabel
-              .replace(/\s+Monthly Report$/i, "")
-              .trim();
-            const suffix = !snapshotAvailable
-              ? `no snapshot available at ${periodMoniker} period end`
-              : undefined;
-            const banner: ReconciliationBannerProps = {
-              label,
-              engineValue: value,
-              pdfValue: pack.losses.pending_cancel_pdf_value,
-              // Absolute URL to the reconciliation note on GitHub. A
-              // relative path resolves against the route (e.g. /dashboard)
-              // and 404s. The repo is currently hosted at
-              // RawFormFitness/pulsar; if/when that changes (rename, fork)
-              // this URL needs updating in lockstep.
-              docHref:
-                "https://github.com/RawFormFitness/pulsar/blob/main/docs/pending_cancel_reconciliation.md",
-              suffix,
-            };
-            sideSlot = <ReconciliationBanner {...banner} />;
-          }
-          return (
-            <MetricTile
-              key={label}
-              label={label}
-              value={value}
-              locale={locale}
-              sideSlot={sideSlot}
-            />
-          );
-        })}
-      </MetricSection>
+      <SectionChartToggleProvider seriesKey="losses" locale={locale}>
+        <MetricSection
+          title="Losses"
+          headerSlot={<ChartToggleHeaderButton />}
+          bodyClassName=""
+        >
+          <ChartToggleBody>
+            {lossesEntries.map(([label, value]) => {
+              const isPendingCancel = label === pendingCancelLabel;
+              let sideSlot: React.ReactNode = null;
+              if (
+                isPendingCancel &&
+                pack.losses.pending_cancel_known_gap &&
+                typeof pack.losses.pending_cancel_pdf_value === "number"
+              ) {
+                // When no `members` snapshot existed at-or-before period.end,
+                // Pending Cancel is structurally 0 — we have no observation,
+                // not a "real" gap. Surface that honestly. We use the
+                // periodLabel ("April 2026 Monthly Report") trimmed to the
+                // month-year fragment for compact copy ("at April 2026 period
+                // end"). The full label would read awkwardly inside the
+                // banner. If the periodLabel format changes, this trim does
+                // a graceful no-op (it just uses the whole label).
+                const periodMoniker = periodLabel
+                  .replace(/\s+Monthly Report$/i, "")
+                  .trim();
+                const suffix = !snapshotAvailable
+                  ? `no snapshot available at ${periodMoniker} period end`
+                  : undefined;
+                const banner: ReconciliationBannerProps = {
+                  label,
+                  engineValue: value,
+                  pdfValue: pack.losses.pending_cancel_pdf_value,
+                  // Absolute URL to the reconciliation note on GitHub. A
+                  // relative path resolves against the route (e.g. /dashboard)
+                  // and 404s. The repo is currently hosted at
+                  // RawFormFitness/pulsar; if/when that changes (rename, fork)
+                  // this URL needs updating in lockstep.
+                  docHref:
+                    "https://github.com/RawFormFitness/pulsar/blob/main/docs/pending_cancel_reconciliation.md",
+                  suffix,
+                };
+                sideSlot = <ReconciliationBanner {...banner} />;
+              }
+              return (
+                <MetricTile
+                  key={label}
+                  label={label}
+                  value={value}
+                  locale={locale}
+                  sideSlot={sideSlot}
+                />
+              );
+            })}
+          </ChartToggleBody>
+        </MetricSection>
+      </SectionChartToggleProvider>
 
       {/* Membership */}
-      <MetricSection title="Membership">
-        {Object.entries(pack.membership.display).map(([label, value]) => {
-          const isString = typeof value === "string";
-          const format: "number" | "signed_number" | "passthrough" = isString
-            ? "passthrough"
-            : label === netGainLabel
-              ? "signed_number"
-              : "number";
-          return (
-            <MetricTile
-              key={label}
-              label={label}
-              value={value}
-              format={format}
-              locale={locale}
-            />
-          );
-        })}
-      </MetricSection>
+      <SectionChartToggleProvider seriesKey="membership" locale={locale}>
+        <MetricSection
+          title="Membership"
+          headerSlot={<ChartToggleHeaderButton />}
+          bodyClassName=""
+        >
+          <ChartToggleBody>
+            {Object.entries(pack.membership.display).map(([label, value]) => {
+              const isString = typeof value === "string";
+              const format: "number" | "signed_number" | "passthrough" =
+                isString
+                  ? "passthrough"
+                  : label === netGainLabel
+                    ? "signed_number"
+                    : "number";
+              return (
+                <MetricTile
+                  key={label}
+                  label={label}
+                  value={value}
+                  format={format}
+                  locale={locale}
+                />
+              );
+            })}
+          </ChartToggleBody>
+        </MetricSection>
+      </SectionChartToggleProvider>
+      </SeriesProvider>
 
       {/* Pipeline Velocity */}
       <section className="space-y-3">

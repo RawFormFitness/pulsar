@@ -1,10 +1,14 @@
 // app/(dashboard)/page.tsx
 //
 // Phase 3B — monthly report with period selector.
+// Phase 3C-1 — per-section chart toggles for four metric sections,
+//              backed by a trailing-six-period series.
 //
 // What this page is, intentionally:
-//   * Server component. Fetches MetricsPack from the analytics-engine and
-//     hands it to <DashboardView />, which renders.
+//   * Server component. Fetches the primary period's MetricsPack from the
+//     analytics-engine (via runPeriod()), hands it to <DashboardView />,
+//     and starts a parallel <Suspense>-streamed series fetch across the
+//     trailing six periods for the in-section chart toggles.
 //   * Period comes from ?period=YYYY-MM. The server validates it against
 //     the gym's available periods (the set of months with any sales data).
 //     Missing / malformed / unknown -> silent fallback to the newest
@@ -25,57 +29,37 @@
 //     from the URL or body; ?period is the only URL-controlled input and
 //     it cannot leak across gyms (the available-period list is itself
 //     gym-scoped).
-//   * Members snapshot filtering happens HERE: the page calls
-//     getLatestSnapshotAsOfDate(period.end) + getMembersAsOf, then passes
-//     the snapshot rows to the engine. The engine assumes a pre-filtered
-//     snapshot.
+//   * Members snapshot filtering is delegated to runPeriod() (which
+//     applies the same period.end cutoff the page used to apply inline).
+//     See app/(dashboard)/_lib/run-period.ts for the helper.
 //
 // Snapshot cutoff at period.end:
-//   For historical periods (e.g. selecting April when we're sitting in
-//   May), feeding the engine the unconditionally-latest snapshot would
-//   leak post-period state into the report — members who moved into
-//   Pending Cancel AFTER the period ended would inflate that tile. We
-//   pin the snapshot cutoff to `period.end` (the gym-local exclusive end
-//   of the period, expressed as a UTC instant). See
-//   lib/db/members.ts → getLatestSnapshotAsOfDate for the timezone
-//   reasoning (informed by commit f67f068's queue_date fix).
-//
-//   Implication for thinly-populated data: if no snapshot exists at or
-//   before period.end, the engine sees an empty members_snapshot. Pending
-//   Cancel reads as 0, and the snapshot-derived slices for that period
-//   are unavailable. This is correct: we have no observation, so we
-//   report no observation rather than misattribute a future snapshot's
-//   state.
+//   Pinned in runPeriod(). For historical periods (e.g. selecting April
+//   when we're sitting in May), feeding the engine the unconditionally-
+//   latest snapshot would leak post-period state into the report.
+//   See lib/db/members.ts → getLatestSnapshotAsOfDate for the timezone
+//   reasoning (informed by commit f67f068's queue_date fix). When no
+//   snapshot exists at or before period.end the engine runs with an
+//   empty members_snapshot — Pending Cancel reads 0 by construction;
+//   the dashboard surfaces that as "no snapshot available" copy on the
+//   Pending Cancel banner rather than treating it as a real reconciliation
+//   variance.
 
 import "server-only";
 
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import * as React from "react";
 
-import {
-  cancellations as cancellationsDb,
-  leads as leadsDb,
-  members as membersDb,
-  rfcEntries as rfcEntriesDb,
-  sales as salesDb,
-} from "@/lib/db";
-import {
-  calendarMonthPeriod,
-  localDateString,
-  runAnalytics,
-  type EngineInput,
-  type GymConfig,
-} from "@/lib/analytics";
-import type {
-  CancellationRow,
-  LeadRow,
-  MemberRow,
-  RfcRow,
-  SaleRow,
-} from "@/lib/parsers/types";
+import { type GymConfig } from "@/lib/analytics";
 import { DashboardView } from "@/components/dashboard/dashboard-view";
+import { SeriesHydrator } from "@/components/dashboard/series-hydrator";
+import { SeriesErrorPusher } from "@/components/dashboard/series-error-pusher";
+import { leads as leadsDb } from "@/lib/db";
 import { requireSessionGym } from "./_lib/session";
 import { listAvailablePeriods, resolvePeriodKey } from "./_lib/periods";
+import { runPeriod } from "./_lib/run-period";
+import { buildTrailingWindow, fetchSeries } from "./_lib/series";
 import { DashboardPeriodSelector } from "./_components/dashboard-period-selector";
 import { DashboardEmptyState } from "./_components/dashboard-empty-state";
 
@@ -171,57 +155,62 @@ export default async function DashboardReportPage({ searchParams }: PageProps) {
     );
   }
 
-  // Period bounds in the gym timezone (Level-2 from config).
-  const period = calendarMonthPeriod(resolvedKey, config.timezone.value);
-  // YMD strings for the cancellations helper, which compares against the
-  // `cancel_date` column (a calendar date, not a timestamptz). Using the
-  // engine's own `localDateString` keeps this identical to how the engine
-  // formats period bounds internally — see lib/analytics/period.ts.
-  const fromYmd = localDateString(period.start, period.timezone);
-  const toYmd = localDateString(period.end, period.timezone);
+  // ---- Lead pool: fetched ONCE per page load --------------------------
+  // The engine needs every lead for the gym on the sale-attribution path
+  // (a sale in April can match a March lead). Before round-2 review, we
+  // re-fetched this seven times per page load (primary + six series
+  // periods). Now we fetch once and thread it through both the primary
+  // runPeriod call AND every series period via the `leadsOverride`
+  // argument. See app/(dashboard)/_lib/run-period.ts header for the
+  // hoist rationale.
+  const leads = await leadsDb.getAllLeadsForGym(client, gymId);
 
-  // ---- Members snapshot (page-level filtering) ------------------------
-  // Cutoff is `period.end` (gym-local exclusive end as a UTC instant).
-  // See header comment for the timezone reasoning; see
-  // lib/db/members.ts → getLatestSnapshotAsOfDate for the helper.
-  const latestAsOf = await membersDb.getLatestSnapshotAsOfDate(
+  // ---- Series for chart toggles (suspended) ---------------------------
+  // Trailing six periods ending at the primary. Built off the same
+  // available-periods list so we never query for a period the gym
+  // doesn't have data for.
+  //
+  // Why we don't await this here: it would block first paint on five
+  // additional engine runs. Wrapping it in <Suspense> below lets React
+  // stream the primary tiles to the browser first; the chart series
+  // arrives a moment later and the four toggleable sections update via
+  // context.
+  //
+  // We BUILD this promise above the primary await so the series fan-out
+  // starts in parallel with the primary period's data fetches. The
+  // awaiting happens inside <Suspense> below.
+  //
+  // See app/(dashboard)/_lib/run-period.ts header for the scaling-cliff
+  // notes on this multi-period fan-out.
+  const trailingWindow = buildTrailingWindow(available, resolvedKey);
+  const seriesPromise = fetchSeries(
     client,
     gymId,
-    period.end,
+    config,
+    trailingWindow,
+    leads,
   );
-  const memberRows = latestAsOf
-    ? await membersDb.getMembersAsOf(client, gymId, latestAsOf)
-    : [];
 
-  // ---- Other inputs in parallel ---------------------------------------
-  const [leadRows, saleRows, rfcRows, cancelRows] = await Promise.all([
-    // Engine filters leads by created_at locally and ALSO needs prior-month
-    // leads on the sale-attribution path (a sale in April can match a March
-    // lead). The helper paginates so we don't silently truncate at the
-    // PostgREST 1,000-row default cap.
-    leadsDb.getAllLeadsForGym(client, gymId),
-    salesDb.getSalesForMonth(client, gymId, period.start, period.end),
-    rfcEntriesDb.getRfcEntriesForMonth(client, gymId, period.start, period.end),
-    cancellationsDb.getCancellationsInPeriod(client, gymId, fromYmd, toYmd),
-  ]);
+  // ---- Primary period: engine run via run-period helper ---------------
+  // The seam where db helpers + analytics engine meet. The helper does
+  // the same fetch+filter dance the page used to do inline; pulling it
+  // out lets the series hydrator below compose the SAME helper across
+  // the trailing six periods without duplicating logic.
+  const { pack, snapshotAvailable } = await runPeriod(
+    client,
+    gymId,
+    config,
+    resolvedKey,
+    null,
+    leads,
+  );
+  const periodLabel = periodLabelFor(resolvedKey, locale);
 
-  // Cast db Row[] to the engine's parser-row type. The engine reads
-  // only the fields that overlap with the Insert shape; extra columns
-  // (id, imported_at) are ignored. This is the seam where two row
-  // shapes meet and is the appropriate place for the cast.
-  const engineInput: EngineInput = {
-    gym_id: gymId,
-    period,
-    leads: leadRows as unknown as LeadRow[],
-    sales: saleRows as unknown as SaleRow[],
-    members_snapshot: memberRows as unknown as MemberRow[],
-    rfc_entries: rfcRows as unknown as RfcRow[],
-    cancellations: cancelRows as unknown as CancellationRow[],
-    prior_period_current_member_base: null,
-  };
-
-  const pack = runAnalytics(engineInput, config);
-  const periodLabel = periodLabelFor(period.key, locale);
+  const seriesSlot = (
+    <React.Suspense fallback={null}>
+      <AwaitSeriesHydrator promise={seriesPromise} />
+    </React.Suspense>
+  );
 
   return (
     <DashboardView
@@ -239,7 +228,35 @@ export default async function DashboardReportPage({ searchParams }: PageProps) {
       // explanatory copy is presentation concern; the engine's contract
       // (run with whatever snapshot you're given) doesn't need to grow
       // an explanation channel for the report layer's benefit.
-      snapshotAvailable={latestAsOf !== null}
+      snapshotAvailable={snapshotAvailable}
+      seriesSlot={seriesSlot}
     />
   );
+}
+
+/** Tiny server-side awaiter so we can keep the SeriesHydrator a
+ * non-async component. React 19 supports awaiting in server components,
+ * which suspends rendering until the promise resolves; the parent
+ * <Suspense> shows its fallback (null — invisible) until then.
+ *
+ * Error handling: a transient PostgREST hiccup on any of the six
+ * parallel runs inside fetchSeries() throws. We catch it here and push
+ * the SeriesProvider into its "error" state so the per-section chart
+ * toggle degrades gracefully (the toggle shows "Could not load trend
+ * data." inside chart view; tile view is unaffected because tiles read
+ * the primary period's pack, not the series pack). Letting the throw
+ * propagate would crash the entire route, which is the wrong tradeoff
+ * — the primary tiles are the report; the chart series is enhancement. */
+async function AwaitSeriesHydrator({
+  promise,
+}: {
+  promise: Promise<Parameters<typeof SeriesHydrator>[0]["pack"]>;
+}) {
+  try {
+    const pack = await promise;
+    return <SeriesHydrator pack={pack} />;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return <SeriesErrorPusher message={message} />;
+  }
 }
